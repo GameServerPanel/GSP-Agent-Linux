@@ -1,8 +1,8 @@
 # ogp_agent systemd Service Script
-# By Open Game Panel
-# OGP <own3mall@gmail.com>
+
+
 [Unit]
-Description=Open Game Panel (OGP) Daemon www.opengamepanel.org
+Description=GameServer Panel (GSP) Daemon www.worlddomination.dev
 After=network.target
 
 [Service]

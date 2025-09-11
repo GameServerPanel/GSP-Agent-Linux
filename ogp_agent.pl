@@ -2240,9 +2240,8 @@ sub steam_cmd_without_decrypt
 	}
 	
 	my $screen_id = create_screen_id(SCREEN_TYPE_UPDATE, $home_id);
-	my $screen_id_for_txt_update = substr ($screen_id, rindex($screen_id, '_') + 1);
 	my $steam_binary = Path::Class::File->new(STEAMCMD_CLIENT_DIR, "steamcmd.sh");
-	my $installSteamFile =  $screen_id_for_txt_update . "_install.txt";
+	my $installSteamFile =  $screen_id . "_install.txt";
 
 	my $installtxt = Path::Class::File->new(STEAMCMD_CLIENT_DIR, $installSteamFile);
 	open  FILE, '>', $installtxt;
@@ -2648,6 +2647,7 @@ sub compress_files_without_decrypt
 		}
 		logger $archive_type." archive $destination$archive_name.$archive_type created successfully";
 		return 1;
+	}
 	}
 	elsif($archive_type eq "bz2")
 	{

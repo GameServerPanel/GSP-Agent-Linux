@@ -3,7 +3,7 @@
 	listen_port  => '12679',
 	listen_ip => '0.0.0.0',
 	version => 'v1.4',
-	key => 'Mvemjsu9p',
+	key => 'ABCDEF',
 	steam_license => 'Accept',
 	sudo_password => 'Inc0rrect!',
 	web_admin_api_key => '{your_admin_ogp_web_api_key_here}',
