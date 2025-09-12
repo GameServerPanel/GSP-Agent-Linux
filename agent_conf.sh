@@ -194,6 +194,29 @@ then
 
 	echo "Writing Config file - $cfgfile"
 
+
+	# Prompt for resource stats MySQL settings
+	echo
+	echo "Configure Resource Stats MySQL Database Connection:"
+	echo -n "Stats DB Host [Default 127.0.0.1]: "
+	read stats_db_host
+	if [ -z "$stats_db_host" ]; then stats_db_host='127.0.0.1'; fi
+	echo -n "Stats DB User [Default panel_user]: "
+	read stats_db_user
+	if [ -z "$stats_db_user" ]; then stats_db_user='panel_user'; fi
+	echo -n "Stats DB Password [Default REPLACE_ME]: "
+	read stats_db_pass
+	if [ -z "$stats_db_pass" ]; then stats_db_pass='REPLACE_ME'; fi
+	echo -n "Stats DB Name [Default panel_database]: "
+	read stats_db_name
+	if [ -z "$stats_db_name" ]; then stats_db_name='panel_database'; fi
+	echo -n "Stats Table Prefix [Default gsp_]: "
+	read stats_table_prefix
+	if [ -z "$stats_table_prefix" ]; then stats_table_prefix='gsp_'; fi
+	echo -n "Stats Frequency Minutes [Default 5]: "
+	read stats_frequency_minutes
+	if [ -z "$stats_frequency_minutes" ]; then stats_frequency_minutes='5'; fi
+
 	echo "%Cfg::Config = (
 	logfile => '${agent_home}/ogp_agent.log',
 	listen_port  => '${port}',
@@ -205,6 +228,13 @@ then
 	web_admin_api_key => '{your_admin_ogp_web_api_key_here}',
 	web_api_url => '{your_url_to_ogp_api.php}',
 	steam_dl_limit => '0',
+	# Resource stats database configuration
+	stats_db_host => '${stats_db_host}',
+	stats_db_user => '${stats_db_user}',
+	stats_db_pass => '${stats_db_pass}',
+	stats_db_name => '${stats_db_name}',
+	stats_table_prefix => '${stats_table_prefix}',
+	stats_frequency_minutes => '${stats_frequency_minutes}',
 	);" > $cfgfile
 	
 	if [ $? != 0 ]
