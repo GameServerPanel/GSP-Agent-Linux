@@ -2531,149 +2531,119 @@ sub compress_files
 
 sub compress_files_without_decrypt
 {
-	my ($files,$destination,$archive_name,$archive_type) = @_;
 
-	if (!-e $destination)
-	{
-		logger "compress_files: Destination path ( $destination ) could not be found.";
-		return -1;
-	}
-	
-	chdir $destination;
-	my @items = split /\Q\n/, $files;
-	my @inventory;
-	if($archive_type eq "zip")
-	{
-		logger $archive_type." compression called, destination archive is: $destination$archive_name.$archive_type";
-		my $zip = Archive::Zip->new();
-		foreach my $item (@items) {
-			if(-e $item)
-			{
-				if (-f $item)
-				{
-					$zip->addFile( $item );
-				}
-				elsif (-d $item)
-				{
-					$zip->addTree( $item, $item );
-				} 
-			}
+	sub compress_files_without_decrypt {
+		my ($files, $destination, $archive_name, $archive_type) = @_;
+		my @items = split /\Q\n/, $files;
+		my @inventory;
+
+		if (!-e $destination) {
+			logger "compress_files: Destination path ( $destination ) could not be found.";
+			return -1;
 		}
-		# Save the file
-		unless ( $zip->writeToFileNamed($archive_name.'.zip') == AZ_OK ) {
-			logger "Write Error at $destination/$archive_name.$archive_type";
-			return -1
-		}
-		logger $archive_type." archive $destination$archive_name.$archive_type created successfully";
-		return 1;
-	}
-	elsif($archive_type eq "tbz")
-	{
-		logger $archive_type." compression called, destination archive is: $destination$archive_name.$archive_type";
-		my $tar = Archive::Tar->new;
-		foreach my $item (@items) {
-			if(-e $item)
-			{
-				if (-f $item)
-				{
-					$tar->add_files( $item );
-				}
-				elsif (-d $item)
-				{
-					@inventory = ();
-					find (sub { push @inventory, $File::Find::name }, $item);
-					$tar->add_files( @inventory );
-				} 
-			}
-		}
-		# Save the file
-		unless ( $tar->write("$archive_name.$archive_type", COMPRESS_BZIP) ) {
-			logger "Write Error at $destination/$archive_name.$archive_type";
-			return -1
-		}
-		logger $archive_type." archive $destination$archive_name.$archive_type created successfully";
-		return 1;
-	}
-	elsif($archive_type eq "tgz")
-	{
-		logger $archive_type." compression called, destination archive is: $destination$archive_name.$archive_type";
-		my $tar = Archive::Tar->new;
-		foreach my $item (@items) {
-			if(-e $item)
-			{
-				if (-f $item)
-				{
-					$tar->add_files( $item );
-				}
-				elsif (-d $item)
-				{
-					@inventory = ();
-					find (sub { push @inventory, $File::Find::name }, $item);
-					$tar->add_files( @inventory );
-				} 
-			}
-		}
-		# Save the file
-		unless ( $tar->write("$archive_name.$archive_type", COMPRESS_GZIP) ) {
-			logger "Write Error at $destination/$archive_name.$archive_type";
-			return -1
-		}
-		logger $archive_type." archive $destination$archive_name.$archive_type created successfully";
-		return 1;
-	}
-	elsif($archive_type eq "tar")
-	{
-		logger $archive_type." compression called, destination archive is: $destination$archive_name.$archive_type";
-		my $tar = Archive::Tar->new;
-		foreach my $item (@items) {
-			if(-e $item)
-			{
-				if (-f $item)
-				{
-					$tar->add_files( $item );
-				}
-				elsif (-d $item)
-				{
-					@inventory = ();
-					find (sub { push @inventory, $File::Find::name }, $item);
-					$tar->add_files( @inventory );
-				} 
-			}
-		}
-		# Save the file
-		unless ( $tar->write("$archive_name.$archive_type") ) {
-			logger "Write Error at $destination/$archive_name.$archive_type";
-			return -1
-		}
-		logger $archive_type." archive $destination$archive_name.$archive_type created successfully";
-		return 1;
-	}
-	}
-	elsif($archive_type eq "bz2")
-	{
-		logger $archive_type." compression called.";
-		foreach my $item (@items) {
-			if(-e $item)
-			{
-				if (-f $item)
-				{
-					bzip2 $item => "$item.bz2";
-				}
-				elsif (-d $item)
-				{
-					@inventory = ();
-					find (sub { push @inventory, $File::Find::name }, $item);
-					foreach my $relative_item (@inventory) {
-						bzip2 $relative_item => "$relative_item.bz2";
+		chdir $destination;
+
+		if ($archive_type eq "zip") {
+			logger "$archive_type compression called, destination archive is: $destination$archive_name.$archive_type";
+			my $zip = Archive::Zip->new();
+			foreach my $item (@items) {
+				if (-e $item) {
+					if (-f $item) {
+						$zip->addFile($item);
+					} elsif (-d $item) {
+						$zip->addTree($item, $item);
 					}
 				}
 			}
+			unless ($zip->writeToFileNamed($archive_name . '.zip') == AZ_OK) {
+				logger "Write Error at $destination/$archive_name.$archive_type";
+				return -1;
+			}
+			logger "$archive_type archive $destination$archive_name.$archive_type created successfully";
+			return 1;
 		}
-		logger $archive_type." archives created successfully at $destination";
-		return 1;
+		elsif ($archive_type eq "tbz") {
+			logger "$archive_type compression called, destination archive is: $destination$archive_name.$archive_type";
+			my $tar = Archive::Tar->new;
+			foreach my $item (@items) {
+				if (-e $item) {
+					if (-f $item) {
+						$tar->add_files($item);
+					} elsif (-d $item) {
+						@inventory = ();
+						find(sub { push @inventory, $File::Find::name }, $item);
+						$tar->add_files(@inventory);
+					}
+				}
+			}
+			unless ($tar->write("$archive_name.$archive_type", COMPRESS_BZIP)) {
+				logger "Write Error at $destination/$archive_name.$archive_type";
+				return -1;
+			}
+			logger "$archive_type archive $destination$archive_name.$archive_type created successfully";
+			return 1;
+		}
+		elsif ($archive_type eq "tgz") {
+			logger "$archive_type compression called, destination archive is: $destination$archive_name.$archive_type";
+			my $tar = Archive::Tar->new;
+			foreach my $item (@items) {
+				if (-e $item) {
+					if (-f $item) {
+						$tar->add_files($item);
+					} elsif (-d $item) {
+						@inventory = ();
+						find(sub { push @inventory, $File::Find::name }, $item);
+						$tar->add_files(@inventory);
+					}
+				}
+			}
+			unless ($tar->write("$archive_name.$archive_type", COMPRESS_GZIP)) {
+				logger "Write Error at $destination/$archive_name.$archive_type";
+				return -1;
+			}
+			logger "$archive_type archive $destination$archive_name.$archive_type created successfully";
+			return 1;
+		}
+		elsif ($archive_type eq "tar") {
+			logger "$archive_type compression called, destination archive is: $destination$archive_name.$archive_type";
+			my $tar = Archive::Tar->new;
+			foreach my $item (@items) {
+				if (-e $item) {
+					if (-f $item) {
+						$tar->add_files($item);
+					} elsif (-d $item) {
+						@inventory = ();
+						find(sub { push @inventory, $File::Find::name }, $item);
+						$tar->add_files(@inventory);
+					}
+				}
+			}
+			unless ($tar->write("$archive_name.$archive_type")) {
+				logger "Write Error at $destination/$archive_name.$archive_type";
+				return -1;
+			}
+			logger "$archive_type archive $destination$archive_name.$archive_type created successfully";
+			return 1;
+		}
+		elsif ($archive_type eq "bz2") {
+			logger "$archive_type compression called.";
+			foreach my $item (@items) {
+				if (-e $item) {
+					if (-f $item) {
+						bzip2 $item => "$item.bz2";
+					} elsif (-d $item) {
+						@inventory = ();
+						find(sub { push @inventory, $File::Find::name }, $item);
+						foreach my $relative_item (@inventory) {
+							bzip2 $relative_item => "$relative_item.bz2";
+						}
+					}
+				}
+			}
+			logger "$archive_type archives created successfully at $destination";
+			return 1;
+		}
 	}
-}
-
 sub discover_ips
 {
 	return "Bad Encryption Key" unless(decrypt_param(pop(@_)) eq "Encryption checking OK");
