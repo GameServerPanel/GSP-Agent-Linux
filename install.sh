@@ -266,36 +266,39 @@ fi
 init_dir=${init_dir%/}
 echo "Copying files..."
 
+# Copy all files and set install.sh as executable
 cp -avf ./* ${agent_home}/ || failed "Failed to copy agent files to ${agent_home}."
+chmod +x ${agent_home}/install.sh || failed "Failed to set install.sh as executable."
 
 
-# Prompt for resource usage stats enablement and details
+
+# Collect all config settings up front
 echo
 echo "Enable resource usage stats collection and MySQL reporting?"
 echo -n "(yes/no) [Default no]: "
 read enable_stats
 if [ "$enable_stats" == "yes" ]; then
-	echo -n "MySQL server [Default 127.0.0.1]: "
-	read stats_db_host
-	if [ -z "$stats_db_host" ]; then stats_db_host='127.0.0.1'; fi
-	echo -n "MySQL port [Default 3306]: "
-	read stats_db_port
-	if [ -z "$stats_db_port" ]; then stats_db_port='3306'; fi
-	echo -n "MySQL username [Default panel_user]: "
-	read stats_db_user
-	if [ -z "$stats_db_user" ]; then stats_db_user='panel_user'; fi
-	echo -n "MySQL password [Default REPLACE_ME]: "
-	read stats_db_pass
-	if [ -z "$stats_db_pass" ]; then stats_db_pass='REPLACE_ME'; fi
-	echo -n "MySQL DB name [Default panel_database]: "
-	read stats_db_name
-	if [ -z "$stats_db_name" ]; then stats_db_name='panel_database'; fi
-	echo -n "Stats table prefix [Default gsp_]: "
-	read stats_table_prefix
-	if [ -z "$stats_table_prefix" ]; then stats_table_prefix='gsp_'; fi
-	stats_enabled=1
+    echo -n "MySQL server [Default 127.0.0.1]: "
+    read stats_db_host
+    if [ -z "$stats_db_host" ]; then stats_db_host='127.0.0.1'; fi
+    echo -n "MySQL port [Default 3306]: "
+    read stats_db_port
+    if [ -z "$stats_db_port" ]; then stats_db_port='3306'; fi
+    echo -n "MySQL username [Default panel_user]: "
+    read stats_db_user
+    if [ -z "$stats_db_user" ]; then stats_db_user='panel_user'; fi
+    echo -n "MySQL password [Default REPLACE_ME]: "
+    read stats_db_pass
+    if [ -z "$stats_db_pass" ]; then stats_db_pass='REPLACE_ME'; fi
+    echo -n "MySQL DB name [Default panel_database]: "
+    read stats_db_name
+    if [ -z "$stats_db_name" ]; then stats_db_name='panel_database'; fi
+    echo -n "Stats table prefix [Default gsp_]: "
+    read stats_table_prefix
+    if [ -z "$stats_table_prefix" ]; then stats_table_prefix='gsp_'; fi
+    stats_enabled=1
 else
-	stats_enabled=0
+    stats_enabled=0
 fi
 
 # Create the directory for configs.
@@ -359,24 +362,22 @@ echo "Install Successful!"
 echo "Now configuring..."
 echo ""
 
-# Run the configuration script
 
+# Run the configuration script non-interactively, passing all collected config
 chmod +x ${agent_home}/agent_conf.sh
-
-# Pass stats config to agent_conf.sh
 if [ -z "$opType" ]; then
-	if [ "$stats_enabled" == "1" ]; then
-		bash ${agent_home}/agent_conf.sh -s $sudo_password -u $username \
-			--stats-enable yes \
-			--stats-db-host "$stats_db_host" \
-			--stats-db-port "$stats_db_port" \
-			--stats-db-user "$stats_db_user" \
-			--stats-db-pass "$stats_db_pass" \
-			--stats-db-name "$stats_db_name" \
-			--stats-table-prefix "$stats_table_prefix"
-	else
-		bash ${agent_home}/agent_conf.sh -s $sudo_password -u $username --stats-enable no
-	fi
+    if [ "$stats_enabled" == "1" ]; then
+        bash ${agent_home}/agent_conf.sh -s "$sudo_password" -u "$username" \
+            --stats-enable yes \
+            --stats-db-host "$stats_db_host" \
+            --stats-db-port "$stats_db_port" \
+            --stats-db-user "$stats_db_user" \
+            --stats-db-pass "$stats_db_pass" \
+            --stats-db-name "$stats_db_name" \
+            --stats-table-prefix "$stats_table_prefix"
+    else
+        bash ${agent_home}/agent_conf.sh -s "$sudo_password" -u "$username" --stats-enable no
+    fi
 fi
 
 echo "Attempting to start the Open Game Panel (OGP) agent..."  
