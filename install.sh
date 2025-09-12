@@ -161,6 +161,7 @@ else
         fi
 		
 		if [ -z "$ogpUserPass" ] ; then
+
 			echo -n "Enter user password: ";
 			read sudo_password;
 		else
