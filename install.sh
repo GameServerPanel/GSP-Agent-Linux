@@ -267,40 +267,31 @@ fi
 init_dir=${init_dir%/}
 echo "Copying files..."
 
-# Copy all files and set install.sh as executable
-cp -avf ./* ${agent_home}/ || failed "Failed to copy agent files to ${agent_home}."
-chmod +x ${agent_home}/install.sh || failed "Failed to set install.sh as executable."
 
+# Always copy install.sh itself into the install folder
+cp -vf "$0" "${agent_home}/install.sh" || failed "Failed to copy install.sh to ${agent_home}."
+chmod +x "${agent_home}/install.sh" || failed "Failed to set install.sh as executable."
 
+# Overwrite all other files and folders except install.sh
+find . -mindepth 1 -not -name install.sh -exec cp -rf {} "${agent_home}/" \;
 
-# Collect all config settings up front
-echo
-echo "Enable resource usage stats collection and MySQL reporting?"
-echo -n "(yes/no) [Default no]: "
-read enable_stats
-if [ "$enable_stats" == "yes" ]; then
-    echo -n "MySQL server [Default 127.0.0.1]: "
-    read stats_db_host
-    if [ -z "$stats_db_host" ]; then stats_db_host='127.0.0.1'; fi
-    echo -n "MySQL port [Default 3306]: "
-    read stats_db_port
-    if [ -z "$stats_db_port" ]; then stats_db_port='3306'; fi
-    echo -n "MySQL username [Default panel_user]: "
-    read stats_db_user
-    if [ -z "$stats_db_user" ]; then stats_db_user='panel_user'; fi
-    echo -n "MySQL password [Default REPLACE_ME]: "
-    read stats_db_pass
-    if [ -z "$stats_db_pass" ]; then stats_db_pass='REPLACE_ME'; fi
-    echo -n "MySQL DB name [Default panel_database]: "
-    read stats_db_name
-    if [ -z "$stats_db_name" ]; then stats_db_name='panel_database'; fi
-    echo -n "Stats table prefix [Default gsp_]: "
-    read stats_table_prefix
-    if [ -z "$stats_table_prefix" ]; then stats_table_prefix='gsp_'; fi
-    stats_enabled=1
-else
-    stats_enabled=0
+# If this is a reconfiguration (install.sh run in an existing install folder)
+if [ -e "${agent_home}/ogp_agent.pid" ]; then
+	echo "OGP agent appears to be running. Stopping agent..."
+	if [ -e "${agent_home}/ogp_agent_run" ]; then
+		bash "${agent_home}/ogp_agent_run" stop
+	fi
+	if [ -e "${agent_home}/ogp_agent.pid" ]; then
+		rm -f "${agent_home}/ogp_agent.pid"
+	fi
+	if [ -e "${agent_home}/ogp_agent.log" ]; then
+		rm -f "${agent_home}/ogp_agent.log"
+	fi
+	echo "Agent stopped and logs/PID cleaned."
 fi
+
+
+
 
 # Create the directory for configs.
 mkdir -p ${agent_home}/Cfg || failed "Failed to create ${agent_home}/Cfg dir."
