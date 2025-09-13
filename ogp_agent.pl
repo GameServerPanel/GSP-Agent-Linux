@@ -44,6 +44,9 @@ use Archive::Extract;	 # Used to handle archived files.
 use File::Find;
 use Schedule::Cron; # Used for scheduling tasks
 
+# Database connectivity for resource stats
+use DBI; # Database interface for MySQL connection
+
 # Compression tools
 use IO::Compress::Bzip2 qw(bzip2 $Bzip2Error); # Used to compress files to bz2.
 use Compress::Zlib; # Used to compress file download buffers to zlib.
@@ -62,6 +65,13 @@ use constant AGENT_VERSION  => $Cfg::Config{version};
 use constant WEB_ADMIN_API_KEY  => $Cfg::Config{web_admin_api_key};
 use constant WEB_API_URL => $Cfg::Config{web_api_url};
 use constant STEAM_DL_LIMIT => $Cfg::Config{steam_dl_limit};
+# Resource stats database configuration
+use constant STATS_DB_HOST => $Cfg::Config{stats_db_host};
+use constant STATS_DB_USER => $Cfg::Config{stats_db_user};
+use constant STATS_DB_PASS => $Cfg::Config{stats_db_pass};
+use constant STATS_DB_NAME => $Cfg::Config{stats_db_name};
+use constant STATS_TABLE_PREFIX => $Cfg::Config{stats_table_prefix};
+use constant STATS_FREQUENCY_MINUTES => $Cfg::Config{stats_frequency_minutes};
 use constant SCREEN_LOG_LOCAL  => $Cfg::Preferences{screen_log_local};
 use constant DELETE_LOGS_AFTER  => $Cfg::Preferences{delete_logs_after};
 use constant LINUX_USER_PER_GAME_SERVER  => $Cfg::Preferences{linux_user_per_game_server};
@@ -311,6 +321,11 @@ my $cron = new Schedule::Cron( \&scheduler_dispatcher, {
                                        } );
 
 $cron->add_entry( "* * * * * *", \&scheduler_read_tasks );
+# Add resource stats collection task if configured
+if (defined STATS_FREQUENCY_MINUTES && STATS_FREQUENCY_MINUTES =~ /^\d+$/ && STATS_FREQUENCY_MINUTES > 0) {
+	logger "Scheduling resource stats collection every " . STATS_FREQUENCY_MINUTES . " minutes.";
+	$cron->add_entry( "*/" . STATS_FREQUENCY_MINUTES . " * * * *", \&collect_and_submit_resource_stats );
+}
 # Run scheduler
 $cron->run( {detach=>1, pid_file=>SCHED_PID} );
 
@@ -2873,11 +2888,208 @@ sub mon_stats
 		return -1;
 	}
 
+	# Collect all resource statistics
+	logger "Collecting resource usage statistics...";
+	
+	# Get CPU usage
+	my %cpu_data;
+	my %prev_idle;
+	my %prev_total;
+	open(STAT, '/proc/stat');
+	while (<STAT>) {
+		next unless /^cpu([0-9]+)/;
+		my @stat = split /\s+/, $_;
+		$prev_idle{$1} = $stat[4];
+		$prev_total{$1} = $stat[1] + $stat[2] + $stat[3] + $stat[4];
+	}
+	close STAT;
+	sleep 1;
+	my %idle;
+	my %total;
+	open(STAT, '/proc/stat');
+	while (<STAT>) {
+		next unless /^cpu([0-9]+)/;
+		my @stat = split /\s+/, $_;
+		$idle{$1} = $stat[4];
+		$total{$1} = $stat[1] + $stat[2] + $stat[3] + $stat[4];
+	}
+	close STAT;
+	my $total_cpu_usage = 0;
+	my $cpu_core_count = 0;
+	foreach my $key ( keys %idle )
+	{
+		my $diff_idle = $idle{$key} - $prev_idle{$key};
+		my $diff_total = $total{$key} - $prev_total{$key};
+		my $percent = (100 * ($diff_total - $diff_idle)) / $diff_total;
+		$percent = sprintf "%.2f", $percent unless $percent == 0;
+		$total_cpu_usage += $percent;
+		$cpu_core_count++;
+	}
+	my $avg_cpu_usage = $cpu_core_count > 0 ? sprintf("%.2f", $total_cpu_usage / $cpu_core_count) : 0;
+	
+	# Get RAM usage
+	my($mem_total, $buffers, $cached, $mem_free) = qw(0 0 0 0);
+	open(STAT, '/proc/meminfo');
+	while (<STAT>) {
+		$mem_total   += $1 if /MemTotal\:\s+(\d+) kB/;
+		$buffers += $1 if /Buffers\:\s+(\d+) kB/;
+		$cached  += $1 if /Cached\:\s+(\d+) kB/;
+		$mem_free    += $1 if /MemFree\:\s+(\d+) kB/;
+	}
+	close STAT;
+	my $mem_used = $mem_total - $mem_free - $cached - $buffers;
+	my $mem_percent = $mem_total > 0 ? sprintf("%.2f", 100 * $mem_used / $mem_total) : 0;
+	$mem_total *= 1024; # Convert to bytes
+	$mem_used *= 1024;  # Convert to bytes
+	
+	# Get disk usage
+	my($disk_total, $disk_used, $disk_free) = split(' ', `df -lP 2>/dev/null|grep "^/dev/.*"|awk '{total+=\$2}{used+=\$3}{free+=\$4} END {print total, used, free}'`);
+	my $disk_percent = $disk_total > 0 ? sprintf("%.2f", 100 * $disk_used / $disk_total) : 0;
+	$disk_total *= 1024; # Convert to bytes
+	$disk_used *= 1024;  # Convert to bytes
+	$disk_free *= 1024;  # Convert to bytes
+	
+	# Get uptime
+	open(STAT, '/proc/uptime');
+	my $uptime = 0;
+	while (<STAT>) {
+		$uptime += $1 if /^([0-9]+)/;
+	}
+	close STAT;
+	
+	# Get load average
+	my $load_avg_1min = "0";
+	my $load_avg_5min = "0";
+	my $load_avg_15min = "0";
+	open(LOADAVG, '/proc/loadavg');
+	while (<LOADAVG>) {
+		if (/^(\S+)\s+(\S+)\s+(\S+)/) {
+			$load_avg_1min = $1;
+			$load_avg_5min = $2;
+			$load_avg_15min = $3;
+		}
+	}
+	close LOADAVG;
+	
+	# Log the collected statistics
+	logger "Resource stats collected - CPU: ${avg_cpu_usage}%, Memory: ${mem_percent}% (${mem_used}/${mem_total} bytes), Disk: ${disk_percent}% (${disk_used}/${disk_total} bytes), Uptime: ${uptime}s, Load: ${load_avg_1min}/${load_avg_5min}/${load_avg_15min}";
+	
+	# Submit to database if configured
+	my $submit_result = submit_resource_stats_to_db($avg_cpu_usage, $mem_used, $mem_total, $mem_percent, $disk_used, $disk_total, $disk_free, $disk_percent, $uptime, $load_avg_1min, $load_avg_5min, $load_avg_15min);
+	
+	if ($submit_result == 1) {
+		logger "Resource statistics successfully submitted to MySQL database.";
+	} elsif ($submit_result == -1) {
+		logger "Failed to submit resource statistics to MySQL database - database not configured.";
+	} else {
+		logger "Failed to submit resource statistics to MySQL database - error occurred.";
+	}
+
+	# Return basic format for compatibility
 	my @disk			= `df -hP -x tmpfs`;
 	my $encoded_content = encode_list(@disk);
-	my @uptime			= `uptime`;
-	$encoded_content   .= encode_list(@uptime);
+	my @uptime_compat			= `uptime`;
+	$encoded_content   .= encode_list(@uptime_compat);
 	return "1;$encoded_content";
+}
+
+sub submit_resource_stats_to_db
+{
+	my ($cpu_usage, $mem_used, $mem_total, $mem_percent, $disk_used, $disk_total, $disk_free, $disk_percent, $uptime, $load_1min, $load_5min, $load_15min) = @_;
+	
+	# Check if database is configured
+	if (!defined STATS_DB_HOST || STATS_DB_HOST eq '' || 
+		!defined STATS_DB_USER || STATS_DB_USER eq '' ||
+		!defined STATS_DB_PASS || STATS_DB_PASS eq '' || STATS_DB_PASS eq 'REPLACE_ME' ||
+		!defined STATS_DB_NAME || STATS_DB_NAME eq '') {
+		logger "Resource stats database not configured - skipping database submission.";
+		return -1;
+	}
+	
+	my $dbh;
+	eval {
+		# Connect to MySQL database
+		my $dsn = "DBI:mysql:database=" . STATS_DB_NAME . ";host=" . STATS_DB_HOST;
+		$dbh = DBI->connect($dsn, STATS_DB_USER, STATS_DB_PASS, {
+			RaiseError => 1,
+			AutoCommit => 1,
+			mysql_enable_utf8 => 1
+		});
+		
+		if (!$dbh) {
+			logger "Failed to connect to MySQL database: $DBI::errstr";
+			return 0;
+		}
+		
+		# Create table if it doesn't exist
+		my $table_name = STATS_TABLE_PREFIX . "agent_resource_stats";
+		my $create_table_sql = qq{
+			CREATE TABLE IF NOT EXISTS `$table_name` (
+				`id` INT AUTO_INCREMENT PRIMARY KEY,
+				`agent_key` VARCHAR(255) NOT NULL,
+				`timestamp` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+				`cpu_usage_percent` DECIMAL(5,2) NOT NULL,
+				`memory_used_bytes` BIGINT NOT NULL,
+				`memory_total_bytes` BIGINT NOT NULL,
+				`memory_usage_percent` DECIMAL(5,2) NOT NULL,
+				`disk_used_bytes` BIGINT NOT NULL,
+				`disk_total_bytes` BIGINT NOT NULL,
+				`disk_free_bytes` BIGINT NOT NULL,
+				`disk_usage_percent` DECIMAL(5,2) NOT NULL,
+				`uptime_seconds` INT NOT NULL,
+				`load_average_1min` DECIMAL(4,2) NOT NULL,
+				`load_average_5min` DECIMAL(4,2) NOT NULL,
+				`load_average_15min` DECIMAL(4,2) NOT NULL,
+				INDEX `idx_agent_key` (`agent_key`),
+				INDEX `idx_timestamp` (`timestamp`)
+			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+		};
+		
+		$dbh->do($create_table_sql);
+		
+		# Insert the resource stats
+		my $insert_sql = qq{
+			INSERT INTO `$table_name` (
+				agent_key, cpu_usage_percent, memory_used_bytes, memory_total_bytes, 
+				memory_usage_percent, disk_used_bytes, disk_total_bytes, disk_free_bytes, 
+				disk_usage_percent, uptime_seconds, load_average_1min, load_average_5min, 
+				load_average_15min
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		};
+		
+		my $sth = $dbh->prepare($insert_sql);
+		$sth->execute(
+			AGENT_KEY,          # agent_key
+			$cpu_usage,         # cpu_usage_percent
+			$mem_used,          # memory_used_bytes
+			$mem_total,         # memory_total_bytes
+			$mem_percent,       # memory_usage_percent
+			$disk_used,         # disk_used_bytes
+			$disk_total,        # disk_total_bytes
+			$disk_free,         # disk_free_bytes
+			$disk_percent,      # disk_usage_percent
+			$uptime,            # uptime_seconds
+			$load_1min,         # load_average_1min
+			$load_5min,         # load_average_5min
+			$load_15min         # load_average_15min
+		);
+		
+		$sth->finish();
+		$dbh->disconnect();
+		
+		logger "Resource statistics inserted into database table '$table_name' successfully.";
+		return 1;
+	};
+	
+	if ($@) {
+		logger "Error submitting resource stats to database: $@";
+		if ($dbh) {
+			$dbh->disconnect();
+		}
+		return 0;
+	}
+	
+	return 1;
 }
 
 sub exec
@@ -3854,6 +4066,112 @@ sub scheduler_dispatcher {
 		$log .= ", response:\n$response";
 	}
 	scheduler_log_events($log);
+}
+
+sub collect_and_submit_resource_stats {
+	my ($task, $args) = @_;
+	
+	logger "Automated resource stats collection started.";
+	
+	eval {
+		# Collect all resource statistics
+		# Get CPU usage
+		my %prev_idle;
+		my %prev_total;
+		open(STAT, '/proc/stat');
+		while (<STAT>) {
+			next unless /^cpu([0-9]+)/;
+			my @stat = split /\s+/, $_;
+			$prev_idle{$1} = $stat[4];
+			$prev_total{$1} = $stat[1] + $stat[2] + $stat[3] + $stat[4];
+		}
+		close STAT;
+		sleep 1;
+		my %idle;
+		my %total;
+		open(STAT, '/proc/stat');
+		while (<STAT>) {
+			next unless /^cpu([0-9]+)/;
+			my @stat = split /\s+/, $_;
+			$idle{$1} = $stat[4];
+			$total{$1} = $stat[1] + $stat[2] + $stat[3] + $stat[4];
+		}
+		close STAT;
+		my $total_cpu_usage = 0;
+		my $cpu_core_count = 0;
+		foreach my $key ( keys %idle )
+		{
+			my $diff_idle = $idle{$key} - $prev_idle{$key};
+			my $diff_total = $total{$key} - $prev_total{$key};
+			my $percent = (100 * ($diff_total - $diff_idle)) / $diff_total;
+			$percent = sprintf "%.2f", $percent unless $percent == 0;
+			$total_cpu_usage += $percent;
+			$cpu_core_count++;
+		}
+		my $avg_cpu_usage = $cpu_core_count > 0 ? sprintf("%.2f", $total_cpu_usage / $cpu_core_count) : 0;
+		
+		# Get RAM usage
+		my($mem_total, $buffers, $cached, $mem_free) = qw(0 0 0 0);
+		open(STAT, '/proc/meminfo');
+		while (<STAT>) {
+			$mem_total   += $1 if /MemTotal\:\s+(\d+) kB/;
+			$buffers += $1 if /Buffers\:\s+(\d+) kB/;
+			$cached  += $1 if /Cached\:\s+(\d+) kB/;
+			$mem_free    += $1 if /MemFree\:\s+(\d+) kB/;
+		}
+		close STAT;
+		my $mem_used = $mem_total - $mem_free - $cached - $buffers;
+		my $mem_percent = $mem_total > 0 ? sprintf("%.2f", 100 * $mem_used / $mem_total) : 0;
+		$mem_total *= 1024; # Convert to bytes
+		$mem_used *= 1024;  # Convert to bytes
+		
+		# Get disk usage
+		my($disk_total, $disk_used, $disk_free) = split(' ', `df -lP 2>/dev/null|grep "^/dev/.*"|awk '{total+=\$2}{used+=\$3}{free+=\$4} END {print total, used, free}'`);
+		my $disk_percent = $disk_total > 0 ? sprintf("%.2f", 100 * $disk_used / $disk_total) : 0;
+		$disk_total *= 1024; # Convert to bytes
+		$disk_used *= 1024;  # Convert to bytes
+		$disk_free *= 1024;  # Convert to bytes
+		
+		# Get uptime
+		open(STAT, '/proc/uptime');
+		my $uptime = 0;
+		while (<STAT>) {
+			$uptime += $1 if /^([0-9]+)/;
+		}
+		close STAT;
+		
+		# Get load average
+		my $load_avg_1min = "0";
+		my $load_avg_5min = "0";
+		my $load_avg_15min = "0";
+		open(LOADAVG, '/proc/loadavg');
+		while (<LOADAVG>) {
+			if (/^(\S+)\s+(\S+)\s+(\S+)/) {
+				$load_avg_1min = $1;
+				$load_avg_5min = $2;
+				$load_avg_15min = $3;
+			}
+		}
+		close LOADAVG;
+		
+		# Log the collected statistics
+		logger "Scheduled resource stats collection - CPU: ${avg_cpu_usage}%, Memory: ${mem_percent}% (${mem_used}/${mem_total} bytes), Disk: ${disk_percent}% (${disk_used}/${disk_total} bytes), Uptime: ${uptime}s, Load: ${load_avg_1min}/${load_avg_5min}/${load_avg_15min}";
+		
+		# Submit to database
+		my $submit_result = submit_resource_stats_to_db($avg_cpu_usage, $mem_used, $mem_total, $mem_percent, $disk_used, $disk_total, $disk_free, $disk_percent, $uptime, $load_avg_1min, $load_avg_5min, $load_avg_15min);
+		
+		if ($submit_result == 1) {
+			logger "Scheduled resource statistics successfully submitted to MySQL database.";
+		} elsif ($submit_result == -1) {
+			logger "Scheduled resource stats: database not configured - skipping submission.";
+		} else {
+			logger "Scheduled resource stats: failed to submit to MySQL database - error occurred.";
+		}
+	};
+	
+	if ($@) {
+		logger "Error in scheduled resource stats collection: $@";
+	}
 }
 
 sub scheduler_server_action
