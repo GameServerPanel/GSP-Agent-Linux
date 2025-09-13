@@ -721,4 +721,12 @@ then
 	then
 		failed "Failed to write MISC configuration file used by bash scripts."
 	fi
+
+	# Ensure all config files are owned by the installation owner
+	if [ -n "$agent_user" ]; then
+		# Ensure agent_user is valid and not root
+		if id "$agent_user" >/dev/null 2>&1 && [ "$agent_user" != "root" ]; then
+			chown "$agent_user" "$cfgfile" "$prefsfile" "$bashprefsfile" 2>/dev/null
+		fi
+	fi
 fi
