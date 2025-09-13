@@ -326,6 +326,17 @@ if (defined STATS_FREQUENCY_MINUTES && STATS_FREQUENCY_MINUTES =~ /^\d+$/ && STA
 	logger "Scheduling resource stats collection every " . STATS_FREQUENCY_MINUTES . " minutes.";
 	$cron->add_entry( "*/" . STATS_FREQUENCY_MINUTES . " * * * *", \&collect_and_submit_resource_stats );
 }
+
+# Create scheduler tasks file if it doesn't exist to prevent read errors
+if (!-e SCHED_TASKS) {
+	if (open(TASKS_INIT, '>', SCHED_TASKS)) {
+		logger "Created empty scheduler tasks file: " . SCHED_TASKS;
+		close(TASKS_INIT);
+	} else {
+		logger "Failed to create scheduler tasks file: " . SCHED_TASKS . " - $!";
+	}
+}
+
 # Run scheduler
 $cron->run( {detach=>1, pid_file=>SCHED_PID} );
 
@@ -3010,6 +3021,7 @@ sub submit_resource_stats_to_db
 	eval {
 		# Connect to MySQL database
 		my $dsn = "DBI:mysql:database=" . STATS_DB_NAME . ";host=" . STATS_DB_HOST;
+		logger "Attempting to connect to MySQL database: $dsn (user: " . STATS_DB_USER . ")";
 		$dbh = DBI->connect($dsn, STATS_DB_USER, STATS_DB_PASS, {
 			RaiseError => 1,
 			AutoCommit => 1,
@@ -3020,6 +3032,8 @@ sub submit_resource_stats_to_db
 			logger "Failed to connect to MySQL database: $DBI::errstr";
 			return 0;
 		}
+		
+		logger "Successfully connected to MySQL database for resource stats submission.";
 		
 		# Create table if it doesn't exist
 		my $table_name = STATS_TABLE_PREFIX . "agent_resource_stats";
@@ -3045,7 +3059,9 @@ sub submit_resource_stats_to_db
 			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
 		};
 		
+		logger "Executing CREATE TABLE query for resource stats table: $table_name";
 		$dbh->do($create_table_sql);
+		logger "Resource stats table '$table_name' created/verified successfully.";
 		
 		# Insert the resource stats
 		my $insert_sql = qq{
@@ -3057,7 +3073,9 @@ sub submit_resource_stats_to_db
 			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		};
 		
+		logger "Preparing INSERT query for resource stats submission.";
 		my $sth = $dbh->prepare($insert_sql);
+		logger "Executing INSERT query with values: agent_key=" . AGENT_KEY . ", cpu_usage=$cpu_usage%, mem_used=$mem_used bytes, mem_total=$mem_total bytes, disk_used=$disk_used bytes, uptime=$uptime seconds";
 		$sth->execute(
 			AGENT_KEY,          # agent_key
 			$cpu_usage,         # cpu_usage_percent
@@ -3075,6 +3093,7 @@ sub submit_resource_stats_to_db
 		);
 		
 		$sth->finish();
+		logger "INSERT query completed successfully. Closing database connection.";
 		$dbh->disconnect();
 		
 		logger "Resource statistics inserted into database table '$table_name' successfully.";
@@ -4359,12 +4378,13 @@ sub scheduler_read_tasks
 	}
 	else
 	{
-		logger "Error reading tasks file $!";
+		logger "Error reading tasks file: $! (file: " . SCHED_TASKS . ")";
 		scheduler_stop();
 		return -1;
 	}
 	
 	my $i = 0;
+	my $task_count = 0;
 	while (<TASKS>)
 	{	
 		next if $_ =~ /^(#.*|[\s|\t]*?\n)/;
@@ -4378,8 +4398,10 @@ sub scheduler_read_tasks
 		{
 			$cron->add_entry($time, 'task_' . $i++, "@args");
 		}
+		$task_count++;
 	}
 	close(TASKS);
+	logger "Scheduler tasks file read successfully. Loaded $task_count task(s)." if $task_count > 0;
 	return 1;
 }
 
