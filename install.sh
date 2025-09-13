@@ -161,7 +161,6 @@ else
         fi
 		
 		if [ -z "$ogpUserPass" ] ; then
-
 			echo -n "Enter user password: ";
 			read sudo_password;
 		else
@@ -265,33 +264,13 @@ then
     init_dir=${DEFAULT_INIT_DIR}
 fi
 init_dir=${init_dir%/}
-echo "Copying files..."
-
-
-# Always copy install.sh itself into the install folder
-cp -vf "$0" "${agent_home}/install.sh" || failed "Failed to copy install.sh to ${agent_home}."
-chmod +x "${agent_home}/install.sh" || failed "Failed to set install.sh as executable."
-
-# Overwrite all other files and folders except install.sh
-find . -mindepth 1 -not -name install.sh -exec cp -rf {} "${agent_home}/" \;
-
-# If this is a reconfiguration (install.sh run in an existing install folder)
-if [ -e "${agent_home}/ogp_agent.pid" ]; then
-	echo "OGP agent appears to be running. Stopping agent..."
-	if [ -e "${agent_home}/ogp_agent_run" ]; then
-		bash "${agent_home}/ogp_agent_run" stop
-	fi
-	if [ -e "${agent_home}/ogp_agent.pid" ]; then
-		rm -f "${agent_home}/ogp_agent.pid"
-	fi
-	if [ -e "${agent_home}/ogp_agent.log" ]; then
-		rm -f "${agent_home}/ogp_agent.log"
-	fi
-	echo "Agent stopped and logs/PID cleaned."
+echo "Copying all files and folders to installation directory..."
+# Use rsync if available, otherwise fallback to find/cp
+if command -v rsync >/dev/null 2>&1; then
+	rsync -a --exclude install.sh ./ "${agent_home}/" || failed "Failed to copy files with rsync to ${agent_home}."
+else
+	find . -mindepth 1 -not -name install.sh -exec cp -rf --parents {} "${agent_home}/" \;
 fi
-
-
-
 
 # Create the directory for configs.
 mkdir -p ${agent_home}/Cfg || failed "Failed to create ${agent_home}/Cfg dir."
@@ -316,15 +295,10 @@ fi
 
 init_file=${init_dir}/ogp_agent
 
-
-# Copy the template and replace OGP_AGENT_DIR and OGP_USER as before
 cp -f $init_file_template $init_file || failed "Failed to create init file ($init_file)."
-sed -i "s|OGP_AGENT_DIR|${agent_home}|g" ${init_file} || failed "Failed to modify init file ($init_file)."
-sed -i "s|OGP_USER|${username}|g" ${init_file} || failed "Failed to modify init file ($init_file)."
-
-# Replace any hardcoded /usr/share/ogp_agent references with ${agent_home} in the init file
-sed -i "s|/usr/share/ogp_agent|${agent_home}|g" ${init_file} || failed "Failed to update log and data paths in init file ($init_file)."
-
+# Next we replace the OGP_AGENT_DIR with the actual dir in init file.
+sed -i "s|OGP_AGENT_DIR|${agent_home}|" ${init_file} || failed "Failed to modify init file ($init_file)."
+sed -i "s|OGP_USER|${username}|" ${init_file} || failed "Failed to modify init file ($init_file)."
 chmod a+x $init_file
 
 if [ "$init_dir" == "$agent_home" ] && [ ! -z "$systemdPresent" ]; then
@@ -354,62 +328,21 @@ echo "Install Successful!"
 echo "Now configuring..."
 echo ""
 
-
-# Run the configuration script non-interactively, passing all collected config
+# Run the configuration script
 chmod +x ${agent_home}/agent_conf.sh
+
 if [ -z "$opType" ]; then
-    if [ "$stats_enabled" == "1" ]; then
-        bash ${agent_home}/agent_conf.sh -s "$sudo_password" -u "$username" \
-            --stats-enable yes \
-            --stats-db-host "$stats_db_host" \
-            --stats-db-port "$stats_db_port" \
-            --stats-db-user "$stats_db_user" \
-            --stats-db-pass "$stats_db_pass" \
-            --stats-db-name "$stats_db_name" \
-            --stats-table-prefix "$stats_table_prefix"
-    else
-        bash ${agent_home}/agent_conf.sh -s "$sudo_password" -u "$username" --stats-enable no
-    fi
+	bash ${agent_home}/agent_conf.sh -s $sudo_password -u $username
 fi
 
 echo "Attempting to start the Open Game Panel (OGP) agent..."  
 
-
 systemctl daemon-reload
-# Removed unused legacy commands: chkconfig and rc-update
+chkconfig ogp_agent on
+rc-update add ogp_agent default
 update-rc.d ogp_agent defaults
 systemctl enable ogp_agent.service
-
-
-# ...existing code...
-# If there is already a question about auto-updating, update its logic to use the stable branch of your repo
-
-if [ "$auto_update_agent" = "yes" ]; then
-	echo "Configuring agent to update from https://github.com/GameServerPanel/GSP_Agent_Linux.git (stable branch) on restart."
-	cat << 'EOF' > ${agent_home}/update_agent.sh
-#!/bin/bash
-cd "$(dirname "$0")"
-if [ -d .git ]; then
-	git fetch origin stable
-	git checkout stable
-	git pull origin stable
-else
-	git clone --branch stable https://github.com/GameServerPanel/GSP_Agent_Linux.git temp_update_dir
-	cp -r temp_update_dir/* .
-	rm -rf temp_update_dir
-fi
-EOF
-	chmod +x ${agent_home}/update_agent.sh
-	service ogp_agent stop
-	bash ${agent_home}/update_agent.sh
-	# Ensure all files are owned by the specified user after update
-	chown --preserve-root -R ${username} ${agent_home}
-	service ogp_agent start
-else
-	service ogp_agent restart
-	# Ensure all files are owned by the specified user after restart
-	chown --preserve-root -R ${username} ${agent_home}
-fi
+service ogp_agent restart
 
 echo;
 echo "OGP installation complete!"  
