@@ -3036,7 +3036,6 @@ sub submit_resource_stats_to_db
 		# Connect to MySQL database
 		my $dsn = "DBI:mysql:database=" . STATS_DB_NAME . ";host=" . STATS_DB_HOST;
 		logger "Attempting to connect to MySQL database: $dsn (user: " . STATS_DB_USER . ")";
-		scheduler_log_events("Attempting MySQL connection to: $dsn (user: " . STATS_DB_USER . ")");
 		$dbh = DBI->connect($dsn, STATS_DB_USER, STATS_DB_PASS, {
 			RaiseError => 1,
 			AutoCommit => 1,
@@ -3045,90 +3044,42 @@ sub submit_resource_stats_to_db
 		
 		if (!$dbh) {
 			logger "Failed to connect to MySQL database: $DBI::errstr";
-			scheduler_log_events("Failed to connect to MySQL database: $DBI::errstr");
 			return 0;
 		}
 		
 		logger "Successfully connected to MySQL database for resource stats submission.";
-		scheduler_log_events("Successfully connected to MySQL database");
 		
-		# Create table if it doesn't exist
-		my $table_name = STATS_TABLE_PREFIX . "agent_resource_stats";
-		my $create_table_sql = qq{
-			CREATE TABLE IF NOT EXISTS `$table_name` (
-				`id` INT AUTO_INCREMENT PRIMARY KEY,
-				`agent_key` VARCHAR(255) NOT NULL,
-				`timestamp` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-				`cpu_usage_percent` DECIMAL(5,2) NOT NULL,
-				`memory_used_bytes` BIGINT NOT NULL,
-				`memory_total_bytes` BIGINT NOT NULL,
-				`memory_usage_percent` DECIMAL(5,2) NOT NULL,
-				`disk_used_bytes` BIGINT NOT NULL,
-				`disk_total_bytes` BIGINT NOT NULL,
-				`disk_free_bytes` BIGINT NOT NULL,
-				`disk_usage_percent` DECIMAL(5,2) NOT NULL,
-				`uptime_seconds` INT NOT NULL,
-				`load_average_1min` DECIMAL(4,2) NOT NULL,
-				`load_average_5min` DECIMAL(4,2) NOT NULL,
-				`load_average_15min` DECIMAL(4,2) NOT NULL,
-				INDEX `idx_agent_key` (`agent_key`),
-				INDEX `idx_timestamp` (`timestamp`)
-			) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-		};
+		# Create the proper database tables based on the schema files
+		create_resource_stats_tables($dbh);
 		
-		logger "Executing CREATE TABLE query for resource stats table: $table_name";
-		scheduler_log_events("Executing CREATE TABLE query for table: $table_name");
-		$dbh->do($create_table_sql);
-		logger "Resource stats table '$table_name' created/verified successfully.";
-		scheduler_log_events("Table '$table_name' created/verified successfully");
+		# Get machine information
+		my $machine_id = get_machine_id();
+		my $hostname = `hostname -f 2>/dev/null || hostname`;
+		chomp($hostname);
+		my $ip = get_local_ip();
 		
-		# Insert the resource stats
-		my $insert_sql = qq{
-			INSERT INTO `$table_name` (
-				agent_key, cpu_usage_percent, memory_used_bytes, memory_total_bytes, 
-				memory_usage_percent, disk_used_bytes, disk_total_bytes, disk_free_bytes, 
-				disk_usage_percent, uptime_seconds, load_average_1min, load_average_5min, 
-				load_average_15min
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		};
+		# Ensure the machine is registered
+		ensure_machine_registered($dbh, $machine_id, $hostname, $ip);
 		
-		logger "Preparing INSERT query for resource stats submission.";
-		scheduler_log_events("Preparing INSERT query for resource stats submission");
-		my $sth = $dbh->prepare($insert_sql);
+		# Get additional system metrics for proper schema compliance
+		my ($swap_used, $swap_total, $disk_path, $net_iface, $rx_bytes, $tx_bytes, $iface_speed) = get_extended_system_metrics();
 		
-		my $values_summary = "agent_key=" . AGENT_KEY . ", cpu_usage=$cpu_usage%, mem_used=$mem_used bytes, mem_total=$mem_total bytes, disk_used=$disk_used bytes, uptime=$uptime seconds";
-		logger "Executing INSERT query with values: $values_summary";
-		scheduler_log_events("Executing INSERT query with values: $values_summary");
+		# Insert machine-level resource sample
+		insert_machine_sample($dbh, $machine_id, $cpu_usage, $mem_used, $mem_total, $mem_percent, 
+		                     $swap_used, $swap_total, $disk_path, $disk_total, $disk_used, $disk_percent,
+		                     $net_iface, $rx_bytes, $tx_bytes, $iface_speed, $load_1min, $load_5min, $load_15min);
 		
-		$sth->execute(
-			AGENT_KEY,          # agent_key
-			$cpu_usage,         # cpu_usage_percent
-			$mem_used,          # memory_used_bytes
-			$mem_total,         # memory_total_bytes
-			$mem_percent,       # memory_usage_percent
-			$disk_used,         # disk_used_bytes
-			$disk_total,        # disk_total_bytes
-			$disk_free,         # disk_free_bytes
-			$disk_percent,      # disk_usage_percent
-			$uptime,            # uptime_seconds
-			$load_1min,         # load_average_1min
-			$load_5min,         # load_average_5min
-			$load_15min         # load_average_15min
-		);
+		# Collect and insert per-process/server resource samples
+		collect_and_insert_process_samples($dbh, $machine_id);
 		
-		$sth->finish();
-		logger "INSERT query completed successfully. Closing database connection.";
-		scheduler_log_events("INSERT query completed successfully");
 		$dbh->disconnect();
 		
-		logger "Resource statistics inserted into database table '$table_name' successfully.";
-		scheduler_log_events("Resource statistics inserted into table '$table_name' successfully");
+		logger "Resource statistics inserted into database successfully.";
 		return 1;
 	};
 	
 	if ($@) {
 		logger "Error submitting resource stats to database: $@";
-		scheduler_log_events("Error submitting resource stats to database: $@");
 		if ($dbh) {
 			$dbh->disconnect();
 		}
@@ -3136,6 +3087,362 @@ sub submit_resource_stats_to_db
 	}
 	
 	return 1;
+}
+
+sub create_resource_stats_tables
+{
+	my ($dbh) = @_;
+	my $table_prefix = STATS_TABLE_PREFIX || 'gsp_';
+	
+	# Create gsp_machines table
+	my $machines_sql = qq{
+		CREATE TABLE IF NOT EXISTS `${table_prefix}machines` (
+			`id` int(11) NOT NULL AUTO_INCREMENT,
+			`machine_id` varchar(64) COLLATE utf8mb4_unicode_ci NOT NULL,
+			`hostname` varchar(255) COLLATE utf8mb4_unicode_ci NOT NULL,
+			`ip` varchar(45) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+			`created_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			PRIMARY KEY (`id`),
+			UNIQUE KEY `uniq_machine` (`machine_id`)
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+	};
+	
+	# Create gsp_machine_samples table
+	my $machine_samples_sql = qq{
+		CREATE TABLE IF NOT EXISTS `${table_prefix}machine_samples` (
+			`id` bigint(20) NOT NULL AUTO_INCREMENT,
+			`machine_id` varchar(64) COLLATE utf8mb4_unicode_ci NOT NULL,
+			`ts` datetime NOT NULL,
+			`load1` decimal(6,2) DEFAULT NULL,
+			`load5` decimal(6,2) DEFAULT NULL,
+			`load15` decimal(6,2) DEFAULT NULL,
+			`cpu_pct` decimal(6,2) DEFAULT NULL,
+			`mem_used_bytes` bigint(20) DEFAULT NULL,
+			`mem_total_bytes` bigint(20) DEFAULT NULL,
+			`mem_used_pct` decimal(6,2) DEFAULT NULL,
+			`swap_used_bytes` bigint(20) DEFAULT NULL,
+			`swap_total_bytes` bigint(20) DEFAULT NULL,
+			`disk_path` varchar(255) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+			`disk_total_bytes` bigint(20) DEFAULT NULL,
+			`disk_used_bytes` bigint(20) DEFAULT NULL,
+			`disk_used_pct` decimal(6,2) DEFAULT NULL,
+			`net_iface` varchar(64) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+			`rx_bytes` bigint(20) DEFAULT NULL,
+			`tx_bytes` bigint(20) DEFAULT NULL,
+			`iface_speed_mbps` int(11) DEFAULT NULL,
+			PRIMARY KEY (`id`),
+			KEY `idx_machine_ts` (`machine_id`,`ts`),
+			KEY `idx_ts` (`ts`)
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+	};
+	
+	# Create gsp_process_samples table
+	my $process_samples_sql = qq{
+		CREATE TABLE IF NOT EXISTS `${table_prefix}process_samples` (
+			`id` bigint(20) NOT NULL AUTO_INCREMENT,
+			`machine_id` varchar(64) COLLATE utf8mb4_unicode_ci NOT NULL,
+			`ts` datetime NOT NULL,
+			`server_name` varchar(255) COLLATE utf8mb4_unicode_ci NOT NULL,
+			`server_path` varchar(512) COLLATE utf8mb4_unicode_ci NOT NULL,
+			`pid` int(11) NOT NULL,
+			`proc_name` varchar(255) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+			`cmd` text COLLATE utf8mb4_unicode_ci,
+			`cpu_pct` decimal(7,2) DEFAULT NULL,
+			`rss_bytes` bigint(20) DEFAULT NULL,
+			`vms_bytes` bigint(20) DEFAULT NULL,
+			`mem_pct` decimal(6,2) DEFAULT NULL,
+			`io_read_bytes` bigint(20) DEFAULT NULL,
+			`io_write_bytes` bigint(20) DEFAULT NULL,
+			`open_fds` int(11) DEFAULT NULL,
+			`listening_ports` varchar(255) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+			`folder_size_bytes` bigint(20) DEFAULT NULL,
+			PRIMARY KEY (`id`),
+			KEY `idx_proc_server` (`machine_id`,`server_name`,`ts`),
+			KEY `idx_proc_pid` (`machine_id`,`pid`,`ts`),
+			KEY `idx_ts` (`ts`)
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+	};
+	
+	logger "Creating resource stats database tables...";
+	$dbh->do($machines_sql);
+	$dbh->do($machine_samples_sql);
+	$dbh->do($process_samples_sql);
+	logger "Resource stats database tables created/verified successfully.";
+}
+
+sub get_machine_id
+{
+	# Use agent key as machine identifier, or fallback to hostname
+	my $machine_id = AGENT_KEY;
+	if (!$machine_id || $machine_id eq '') {
+		$machine_id = `hostname`;
+		chomp($machine_id);
+	}
+	return $machine_id;
+}
+
+sub get_local_ip
+{
+	# Try to get the primary IP address
+	my $ip = `hostname -I 2>/dev/null | awk '{print \$1}'`;
+	chomp($ip);
+	if (!$ip) {
+		$ip = `ip route get 8.8.8.8 2>/dev/null | grep -oP 'src \\K\\S+'`;
+		chomp($ip);
+	}
+	return $ip || '127.0.0.1';
+}
+
+sub ensure_machine_registered
+{
+	my ($dbh, $machine_id, $hostname, $ip) = @_;
+	my $table_prefix = STATS_TABLE_PREFIX || 'gsp_';
+	
+	# Check if machine exists, if not insert it
+	my $check_sql = "SELECT id FROM `${table_prefix}machines` WHERE machine_id = ?";
+	my $sth = $dbh->prepare($check_sql);
+	$sth->execute($machine_id);
+	my $result = $sth->fetchrow_hashref();
+	$sth->finish();
+	
+	if (!$result) {
+		my $insert_sql = "INSERT INTO `${table_prefix}machines` (machine_id, hostname, ip) VALUES (?, ?, ?)";
+		my $insert_sth = $dbh->prepare($insert_sql);
+		$insert_sth->execute($machine_id, $hostname, $ip);
+		$insert_sth->finish();
+		logger "Registered new machine in database: $machine_id ($hostname)";
+	}
+}
+
+sub get_extended_system_metrics
+{
+	# Get swap information
+	my ($swap_used, $swap_total) = (0, 0);
+	if (open(MEMINFO, '/proc/meminfo')) {
+		while (<MEMINFO>) {
+			$swap_total = $1 * 1024 if /SwapTotal\:\s+(\d+) kB/;
+			$swap_used = ($swap_total - $1 * 1024) if /SwapFree\:\s+(\d+) kB/;
+		}
+		close(MEMINFO);
+	}
+	
+	# Get disk path (root filesystem)
+	my $disk_path = '/';
+	
+	# Get network interface and statistics
+	my ($net_iface, $rx_bytes, $tx_bytes, $iface_speed) = ('', 0, 0, 0);
+	my $default_iface = `ip route | grep default | head -1 | awk '{print \$5}'`;
+	chomp($default_iface);
+	
+	if ($default_iface) {
+		$net_iface = $default_iface;
+		if (open(NETDEV, '/proc/net/dev')) {
+			while (<NETDEV>) {
+				if (/^\s*$default_iface:\s*(\d+)\s+\d+\s+\d+\s+\d+\s+\d+\s+\d+\s+\d+\s+\d+\s+(\d+)/) {
+					$rx_bytes = $1;
+					$tx_bytes = $2;
+					last;
+				}
+			}
+			close(NETDEV);
+		}
+		
+		# Try to get interface speed
+		my $speed_file = "/sys/class/net/$default_iface/speed";
+		if (open(SPEED, $speed_file)) {
+			my $speed = <SPEED>;
+			chomp($speed);
+			$iface_speed = $speed if $speed =~ /^\d+$/;
+			close(SPEED);
+		}
+	}
+	
+	return ($swap_used, $swap_total, $disk_path, $net_iface, $rx_bytes, $tx_bytes, $iface_speed);
+}
+
+sub insert_machine_sample
+{
+	my ($dbh, $machine_id, $cpu_usage, $mem_used, $mem_total, $mem_percent, 
+	    $swap_used, $swap_total, $disk_path, $disk_total, $disk_used, $disk_percent,
+	    $net_iface, $rx_bytes, $tx_bytes, $iface_speed, $load_1min, $load_5min, $load_15min) = @_;
+	
+	my $table_prefix = STATS_TABLE_PREFIX || 'gsp_';
+	
+	my $insert_sql = qq{
+		INSERT INTO `${table_prefix}machine_samples` (
+			machine_id, ts, load1, load5, load15, cpu_pct, mem_used_bytes, mem_total_bytes, mem_used_pct,
+			swap_used_bytes, swap_total_bytes, disk_path, disk_total_bytes, disk_used_bytes, disk_used_pct,
+			net_iface, rx_bytes, tx_bytes, iface_speed_mbps
+		) VALUES (?, NOW(), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	};
+	
+	my $sth = $dbh->prepare($insert_sql);
+	$sth->execute(
+		$machine_id, $load_1min, $load_5min, $load_15min, $cpu_usage, $mem_used, $mem_total, $mem_percent,
+		$swap_used, $swap_total, $disk_path, $disk_total, $disk_used, $disk_percent,
+		$net_iface, $rx_bytes, $tx_bytes, $iface_speed
+	);
+	$sth->finish();
+	
+	logger "Machine sample inserted for $machine_id: CPU=$cpu_usage%, MEM=$mem_percent%, DISK=$disk_percent%";
+}
+
+sub collect_and_insert_process_samples
+{
+	my ($dbh, $machine_id) = @_;
+	my $table_prefix = STATS_TABLE_PREFIX || 'gsp_';
+	
+	# Get list of running game server processes (screen sessions and their child processes)
+	my @processes = ();
+	
+	# Find screen sessions that might be game servers
+	my @screen_sessions = `screen -ls 2>/dev/null | grep "\\." | awk '{print \$1}'`;
+	
+	foreach my $session (@screen_sessions) {
+		chomp($session);
+		next unless $session;
+		
+		# Extract server name from screen session name (format: OGP_<server_id>_<server_name>)
+		my $server_name = $session;
+		my $server_path = '/'; # Default path, could be enhanced to find actual server path
+		
+		# Get PIDs of processes in this screen session
+		my $screen_pid = `screen -ls | grep '$session' | sed 's/.*\\(\\([0-9]*\\)\\..*/\\2/'`;
+		chomp($screen_pid);
+		
+		if ($screen_pid && $screen_pid =~ /^\d+$/) {
+			# Get child processes of the screen session
+			my @child_pids = `pgrep -P $screen_pid 2>/dev/null`;
+			push @child_pids, $screen_pid; # Include the screen process itself
+			
+			foreach my $pid (@child_pids) {
+				chomp($pid);
+				next unless $pid && $pid =~ /^\d+$/;
+				
+				# Get process information
+				my $proc_info = get_process_info($pid, $server_name, $server_path);
+				push @processes, $proc_info if $proc_info;
+			}
+		}
+	}
+	
+	# Insert process samples into database
+	my $insert_sql = qq{
+		INSERT INTO `${table_prefix}process_samples` (
+			machine_id, ts, server_name, server_path, pid, proc_name, cmd, cpu_pct, rss_bytes, vms_bytes,
+			mem_pct, io_read_bytes, io_write_bytes, open_fds, listening_ports, folder_size_bytes
+		) VALUES (?, NOW(), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	};
+	
+	my $sth = $dbh->prepare($insert_sql);
+	my $samples_inserted = 0;
+	
+	foreach my $proc (@processes) {
+		eval {
+			$sth->execute(
+				$machine_id, $proc->{server_name}, $proc->{server_path}, $proc->{pid}, $proc->{proc_name},
+				$proc->{cmd}, $proc->{cpu_pct}, $proc->{rss_bytes}, $proc->{vms_bytes}, $proc->{mem_pct},
+				$proc->{io_read_bytes}, $proc->{io_write_bytes}, $proc->{open_fds}, $proc->{listening_ports},
+				$proc->{folder_size_bytes}
+			);
+			$samples_inserted++;
+		};
+		if ($@) {
+			logger "Error inserting process sample for PID $proc->{pid}: $@";
+		}
+	}
+	
+	$sth->finish();
+	logger "Process samples inserted: $samples_inserted processes for $machine_id";
+}
+
+sub get_process_info
+{
+	my ($pid, $server_name, $server_path) = @_;
+	
+	# Get process stats from /proc/<pid>/stat
+	my $stat_file = "/proc/$pid/stat";
+	return undef unless -r $stat_file;
+	
+	my $stat_line = `cat $stat_file 2>/dev/null`;
+	chomp($stat_line);
+	return undef unless $stat_line;
+	
+	my @stat_fields = split /\s+/, $stat_line;
+	my $proc_name = $stat_fields[1] || '';
+	$proc_name =~ s/[()]//g; # Remove parentheses
+	
+	# Get command line
+	my $cmd = `cat /proc/$pid/cmdline 2>/dev/null | tr '\\0' ' '`;
+	chomp($cmd);
+	
+	# Get memory info from /proc/<pid>/status
+	my ($rss_bytes, $vms_bytes) = (0, 0);
+	if (open(STATUS, "/proc/$pid/status")) {
+		while (<STATUS>) {
+			$rss_bytes = $1 * 1024 if /VmRSS:\s+(\d+) kB/;
+			$vms_bytes = $1 * 1024 if /VmSize:\s+(\d+) kB/;
+		}
+		close(STATUS);
+	}
+	
+	# Get CPU percentage (simplified calculation)
+	my $cpu_pct = 0; # Would need historical data for accurate CPU%
+	
+	# Calculate memory percentage (of total system memory)
+	my $mem_pct = 0;
+	my $total_mem = `grep MemTotal /proc/meminfo | awk '{print \$2}'`;
+	chomp($total_mem);
+	if ($total_mem && $total_mem > 0) {
+		$mem_pct = sprintf("%.2f", ($rss_bytes / 1024) / $total_mem * 100);
+	}
+	
+	# Get I/O stats
+	my ($io_read_bytes, $io_write_bytes) = (0, 0);
+	if (open(IO, "/proc/$pid/io")) {
+		while (<IO>) {
+			$io_read_bytes = $1 if /read_bytes:\s+(\d+)/;
+			$io_write_bytes = $1 if /write_bytes:\s+(\d+)/;
+		}
+		close(IO);
+	}
+	
+	# Get open file descriptors count
+	my $open_fds = 0;
+	my $fd_dir = "/proc/$pid/fd";
+	if (opendir(FD_DIR, $fd_dir)) {
+		my @fds = readdir(FD_DIR);
+		$open_fds = scalar(grep { /^\d+$/ } @fds);
+		closedir(FD_DIR);
+	}
+	
+	# Get listening ports (simplified)
+	my $listening_ports = '';
+	my $netstat_output = `netstat -tlnp 2>/dev/null | grep '$pid/' | awk '{print \$4}' | cut -d: -f2 | sort -n | uniq`;
+	if ($netstat_output) {
+		chomp($netstat_output);
+		$listening_ports = join(',', split(/\n/, $netstat_output));
+	}
+	
+	# Get folder size (for server_path) - this is expensive, so we'll skip it for now or do it periodically
+	my $folder_size_bytes = 0;
+	
+	return {
+		server_name => $server_name,
+		server_path => $server_path,
+		pid => $pid,
+		proc_name => $proc_name,
+		cmd => $cmd,
+		cpu_pct => $cpu_pct,
+		rss_bytes => $rss_bytes,
+		vms_bytes => $vms_bytes,
+		mem_pct => $mem_pct,
+		io_read_bytes => $io_read_bytes,
+		io_write_bytes => $io_write_bytes,
+		open_fds => $open_fds,
+		listening_ports => $listening_ports,
+		folder_size_bytes => $folder_size_bytes
+	};
 }
 
 sub exec
@@ -4412,7 +4719,8 @@ sub scheduler_read_tasks
 		my @entries = $cron->list_entries();
 		my @builtin_tasks = ();
 		
-		logger "scheduler_read_tasks: Found " . @entries . " existing tasks before cleanup";
+		# Only log detailed task information when there are actual user tasks to process
+		my $user_task_count = 0;
 		
 		# Preserve built-in tasks (those not starting with 'task_')
 		foreach my $entry (@entries) {
@@ -4422,6 +4730,7 @@ sub scheduler_read_tasks
 				# Check if this is a user-defined task (starts with 'task_')
 				if (defined $first_arg && $first_arg =~ /^task_\d+$/) {
 					$is_user_task = 1;
+					$user_task_count++;
 					logger "scheduler_read_tasks: Removing user task: $first_arg";
 				}
 			}
@@ -4429,11 +4738,14 @@ sub scheduler_read_tasks
 			# Keep all tasks that are NOT user-defined
 			if (!$is_user_task) {
 				push @builtin_tasks, $entry;
-				logger "scheduler_read_tasks: Preserving built-in task: " . $entry->{time};
 			}
 		}
 		
-		logger "scheduler_read_tasks: Preserving " . @builtin_tasks . " built-in tasks";
+		# Only log when there are user tasks to process, reducing spam from built-in task preservation
+		if ($user_task_count > 0) {
+			logger "scheduler_read_tasks: Found " . @entries . " existing tasks, processing $user_task_count user tasks";
+			logger "scheduler_read_tasks: Preserving " . @builtin_tasks . " built-in tasks";
+		}
 		
 		# Clear the timetable
 		$cron->clean_timetable();
@@ -4443,7 +4755,10 @@ sub scheduler_read_tasks
 			$cron->add_entry($builtin_task->{time}, $builtin_task->{dispatcher}, @{$builtin_task->{args}});
 		}
 		
-		logger "scheduler_read_tasks: Re-added " . @builtin_tasks . " built-in tasks";
+		# Only log re-adding when there were user tasks processed
+		if ($user_task_count > 0) {
+			logger "scheduler_read_tasks: Re-added " . @builtin_tasks . " built-in tasks";
+		}
 	}
 	else
 	{
@@ -5165,4 +5480,4 @@ sub trim{
 	my $s = shift; 
 	$s =~ s/^\s+|\s+$//g; 
 	return $s 
-};
+}
