@@ -324,7 +324,10 @@ $cron->add_entry( "* * * * * *", \&scheduler_read_tasks );
 # Add resource stats collection task if configured
 if (defined STATS_FREQUENCY_MINUTES && STATS_FREQUENCY_MINUTES =~ /^\d+$/ && STATS_FREQUENCY_MINUTES > 0) {
 	logger "Scheduling resource stats collection every " . STATS_FREQUENCY_MINUTES . " minutes.";
+	logger "Resource stats collection task added with schedule: */" . STATS_FREQUENCY_MINUTES . " * * * *";
 	$cron->add_entry( "*/" . STATS_FREQUENCY_MINUTES . " * * * *", \&collect_and_submit_resource_stats );
+} else {
+	logger "Resource stats collection not configured or invalid frequency: " . (defined STATS_FREQUENCY_MINUTES ? STATS_FREQUENCY_MINUTES : 'undefined');
 }
 
 # Create scheduler directory if it doesn't exist
@@ -4405,7 +4408,42 @@ sub scheduler_read_tasks
 {
 	if( open(TASKS, '<', SCHED_TASKS) )
 	{
+		# Store built-in scheduler tasks before cleaning timetable
+		my @entries = $cron->list_entries();
+		my @builtin_tasks = ();
+		
+		logger "scheduler_read_tasks: Found " . @entries . " existing tasks before cleanup";
+		
+		# Preserve built-in tasks (those not starting with 'task_')
+		foreach my $entry (@entries) {
+			my $is_user_task = 0;
+			if (defined $entry->{args} && @{$entry->{args}} > 0) {
+				my $first_arg = $entry->{args}->[0];
+				# Check if this is a user-defined task (starts with 'task_')
+				if (defined $first_arg && $first_arg =~ /^task_\d+$/) {
+					$is_user_task = 1;
+					logger "scheduler_read_tasks: Removing user task: $first_arg";
+				}
+			}
+			
+			# Keep all tasks that are NOT user-defined
+			if (!$is_user_task) {
+				push @builtin_tasks, $entry;
+				logger "scheduler_read_tasks: Preserving built-in task: " . $entry->{time};
+			}
+		}
+		
+		logger "scheduler_read_tasks: Preserving " . @builtin_tasks . " built-in tasks";
+		
+		# Clear the timetable
 		$cron->clean_timetable();
+		
+		# Re-add built-in tasks
+		foreach my $builtin_task (@builtin_tasks) {
+			$cron->add_entry($builtin_task->{time}, $builtin_task->{dispatcher}, @{$builtin_task->{args}});
+		}
+		
+		logger "scheduler_read_tasks: Re-added " . @builtin_tasks . " built-in tasks";
 	}
 	else
 	{
