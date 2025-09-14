@@ -1,0 +1,16 @@
+# OGP Agent Scheduler Tasks File
+# This file contains scheduled tasks that the OGP Agent will execute
+# Format: minute hour day_of_month month day_of_week command
+# 
+# Examples:
+# 0 2 * * * echo "Daily maintenance task at 2 AM"
+# */30 * * * * echo "Task runs every 30 minutes"
+# 0 0 * * 0 echo "Weekly task on Sunday at midnight"
+#
+# Special OGP actions can be used with %ACTION= prefix:
+# 0 6 * * * %ACTION=start|%|home_id|%|server_args...
+# 0 22 * * * %ACTION=stop|%|home_id|%|ip|%|port|%|...
+# 0 12 * * * %ACTION=restart|%|home_id|%|...
+#
+# Resource stats collection is automatically scheduled if database is configured
+# Additional custom tasks can be added below:
