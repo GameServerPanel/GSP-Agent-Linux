@@ -102,9 +102,9 @@ use constant SERVER_RUNNER_USER => "ogp_server_runner";
 use constant FD_DIR => Path::Class::Dir->new(AGENT_RUN_DIR, 'FastDownload');
 use constant FD_ALIASES_DIR => Path::Class::Dir->new(FD_DIR, 'aliases');
 use constant FD_PID_FILE => Path::Class::File->new(FD_DIR, 'fd.pid');
-use constant SCHED_PID => Path::Class::File->new(AGENT_RUN_DIR, 'scheduler.pid');
-use constant SCHED_TASKS => Path::Class::File->new(AGENT_RUN_DIR, 'scheduler.tasks');
-use constant SCHED_LOG_FILE => Path::Class::File->new(AGENT_RUN_DIR, 'scheduler.log');
+use constant SCHED_PID => Path::Class::File->new(AGENT_RUN_DIR, 'Schedule', 'scheduler.pid');
+use constant SCHED_TASKS => Path::Class::File->new(AGENT_RUN_DIR, 'Schedule', 'scheduler.tasks');
+use constant SCHED_LOG_FILE => Path::Class::File->new(AGENT_RUN_DIR, 'Schedule', 'scheduler.log');
 
 $Cfg::Config{sudo_password} =~ s/('+)/'\"$1\"'/g;
 our $SUDOPASSWD = $Cfg::Config{sudo_password};
@@ -325,6 +325,16 @@ $cron->add_entry( "* * * * * *", \&scheduler_read_tasks );
 if (defined STATS_FREQUENCY_MINUTES && STATS_FREQUENCY_MINUTES =~ /^\d+$/ && STATS_FREQUENCY_MINUTES > 0) {
 	logger "Scheduling resource stats collection every " . STATS_FREQUENCY_MINUTES . " minutes.";
 	$cron->add_entry( "*/" . STATS_FREQUENCY_MINUTES . " * * * *", \&collect_and_submit_resource_stats );
+}
+
+# Create scheduler directory if it doesn't exist
+my $sched_dir = Path::Class::Dir->new(AGENT_RUN_DIR, 'Schedule');
+if (!-d $sched_dir) {
+	if (mkpath($sched_dir)) {
+		logger "Created scheduler directory: $sched_dir";
+	} else {
+		logger "Failed to create scheduler directory: $sched_dir - $!";
+	}
 }
 
 # Create scheduler tasks file if it doesn't exist to prevent read errors
@@ -3014,6 +3024,7 @@ sub submit_resource_stats_to_db
 		!defined STATS_DB_PASS || STATS_DB_PASS eq '' || STATS_DB_PASS eq 'REPLACE_ME' ||
 		!defined STATS_DB_NAME || STATS_DB_NAME eq '') {
 		logger "Resource stats database not configured - skipping database submission.";
+		scheduler_log_events("Resource stats database not configured - skipping submission");
 		return -1;
 	}
 	
@@ -3022,6 +3033,7 @@ sub submit_resource_stats_to_db
 		# Connect to MySQL database
 		my $dsn = "DBI:mysql:database=" . STATS_DB_NAME . ";host=" . STATS_DB_HOST;
 		logger "Attempting to connect to MySQL database: $dsn (user: " . STATS_DB_USER . ")";
+		scheduler_log_events("Attempting MySQL connection to: $dsn (user: " . STATS_DB_USER . ")");
 		$dbh = DBI->connect($dsn, STATS_DB_USER, STATS_DB_PASS, {
 			RaiseError => 1,
 			AutoCommit => 1,
@@ -3030,10 +3042,12 @@ sub submit_resource_stats_to_db
 		
 		if (!$dbh) {
 			logger "Failed to connect to MySQL database: $DBI::errstr";
+			scheduler_log_events("Failed to connect to MySQL database: $DBI::errstr");
 			return 0;
 		}
 		
 		logger "Successfully connected to MySQL database for resource stats submission.";
+		scheduler_log_events("Successfully connected to MySQL database");
 		
 		# Create table if it doesn't exist
 		my $table_name = STATS_TABLE_PREFIX . "agent_resource_stats";
@@ -3060,8 +3074,10 @@ sub submit_resource_stats_to_db
 		};
 		
 		logger "Executing CREATE TABLE query for resource stats table: $table_name";
+		scheduler_log_events("Executing CREATE TABLE query for table: $table_name");
 		$dbh->do($create_table_sql);
 		logger "Resource stats table '$table_name' created/verified successfully.";
+		scheduler_log_events("Table '$table_name' created/verified successfully");
 		
 		# Insert the resource stats
 		my $insert_sql = qq{
@@ -3074,8 +3090,13 @@ sub submit_resource_stats_to_db
 		};
 		
 		logger "Preparing INSERT query for resource stats submission.";
+		scheduler_log_events("Preparing INSERT query for resource stats submission");
 		my $sth = $dbh->prepare($insert_sql);
-		logger "Executing INSERT query with values: agent_key=" . AGENT_KEY . ", cpu_usage=$cpu_usage%, mem_used=$mem_used bytes, mem_total=$mem_total bytes, disk_used=$disk_used bytes, uptime=$uptime seconds";
+		
+		my $values_summary = "agent_key=" . AGENT_KEY . ", cpu_usage=$cpu_usage%, mem_used=$mem_used bytes, mem_total=$mem_total bytes, disk_used=$disk_used bytes, uptime=$uptime seconds";
+		logger "Executing INSERT query with values: $values_summary";
+		scheduler_log_events("Executing INSERT query with values: $values_summary");
+		
 		$sth->execute(
 			AGENT_KEY,          # agent_key
 			$cpu_usage,         # cpu_usage_percent
@@ -3094,14 +3115,17 @@ sub submit_resource_stats_to_db
 		
 		$sth->finish();
 		logger "INSERT query completed successfully. Closing database connection.";
+		scheduler_log_events("INSERT query completed successfully");
 		$dbh->disconnect();
 		
 		logger "Resource statistics inserted into database table '$table_name' successfully.";
+		scheduler_log_events("Resource statistics inserted into table '$table_name' successfully");
 		return 1;
 	};
 	
 	if ($@) {
 		logger "Error submitting resource stats to database: $@";
+		scheduler_log_events("Error submitting resource stats to database: $@");
 		if ($dbh) {
 			$dbh->disconnect();
 		}
@@ -4091,6 +4115,7 @@ sub collect_and_submit_resource_stats {
 	my ($task, $args) = @_;
 	
 	logger "Automated resource stats collection started.";
+	scheduler_log_events("Resource stats collection started");
 	
 	eval {
 		# Collect all resource statistics
@@ -4174,22 +4199,28 @@ sub collect_and_submit_resource_stats {
 		close LOADAVG;
 		
 		# Log the collected statistics
-		logger "Scheduled resource stats collection - CPU: ${avg_cpu_usage}%, Memory: ${mem_percent}% (${mem_used}/${mem_total} bytes), Disk: ${disk_percent}% (${disk_used}/${disk_total} bytes), Uptime: ${uptime}s, Load: ${load_avg_1min}/${load_avg_5min}/${load_avg_15min}";
+		my $stats_summary = "CPU: ${avg_cpu_usage}%, Memory: ${mem_percent}% (${mem_used}/${mem_total} bytes), Disk: ${disk_percent}% (${disk_used}/${disk_total} bytes), Uptime: ${uptime}s, Load: ${load_avg_1min}/${load_avg_5min}/${load_avg_15min}";
+		logger "Scheduled resource stats collection - $stats_summary";
+		scheduler_log_events("Resource usage collected - $stats_summary");
 		
 		# Submit to database
 		my $submit_result = submit_resource_stats_to_db($avg_cpu_usage, $mem_used, $mem_total, $mem_percent, $disk_used, $disk_total, $disk_free, $disk_percent, $uptime, $load_avg_1min, $load_avg_5min, $load_avg_15min);
 		
 		if ($submit_result == 1) {
 			logger "Scheduled resource statistics successfully submitted to MySQL database.";
+			scheduler_log_events("Resource stats successfully submitted to MySQL database");
 		} elsif ($submit_result == -1) {
 			logger "Scheduled resource stats: database not configured - skipping submission.";
+			scheduler_log_events("Resource stats: database not configured - skipping submission");
 		} else {
 			logger "Scheduled resource stats: failed to submit to MySQL database - error occurred.";
+			scheduler_log_events("Resource stats: failed to submit to MySQL database - error occurred");
 		}
 	};
 	
 	if ($@) {
 		logger "Error in scheduled resource stats collection: $@";
+		scheduler_log_events("Error in resource stats collection: $@");
 	}
 }
 
