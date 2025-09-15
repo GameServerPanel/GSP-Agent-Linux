@@ -3297,6 +3297,29 @@ sub collect_and_insert_process_samples
 	# Get list of running game server processes (screen sessions and their child processes)
 	my @processes = ();
 	
+	# Create lookup table for home_id to server_id mapping from startup files
+	my %home_id_to_server_id = ();
+	if (opendir(STARTUP_DIR_EARLY, GAME_STARTUP_DIR)) {
+		while (my $startup_file = readdir(STARTUP_DIR_EARLY)) {
+			next if $startup_file =~ /^\./;
+			
+			my $startup_path = Path::Class::File->new(GAME_STARTUP_DIR, $startup_file);
+			if (open(STARTUP_FILE_EARLY, '<', $startup_path)) {
+				while (<STARTUP_FILE_EARLY>) {
+					chomp;
+					my ($server_id, $home_path, $server_exe, $run_dir, $startup_cmd, $server_port, $server_ip) = split(',', $_);
+					# Extract home_id from home_path (e.g., /home/gameserver/1518 -> 1518)
+					my ($extracted_home_id) = $home_path =~ /\/(\d+)$/;
+					if ($extracted_home_id && $server_id) {
+						$home_id_to_server_id{$extracted_home_id} = $server_id;
+					}
+				}
+				close(STARTUP_FILE_EARLY);
+			}
+		}
+		closedir(STARTUP_DIR_EARLY);
+	}
+
 	# Find screen sessions that might be game servers
 	my @screen_sessions = `screen -ls 2>/dev/null | grep -E "\\s+[0-9]+\\." | awk '{print \$1}'`;
 	
@@ -3304,16 +3327,23 @@ sub collect_and_insert_process_samples
 		chomp($session);
 		next unless $session;
 		
-		# Extract server name from screen session name (format: OGP_<server_id>_<server_name> or similar)
+		# Extract server name from screen session name (format: OGP_HOME_000001518 or similar)
 		my $server_name = $session;
-		# Try to extract a more readable server name
-		if ($session =~ /OGP_\d+_(.+)/) {
+		my $server_path = '/';
+		
+		# Try to extract home_id from OGP screen session and map to server_id
+		if ($session =~ /OGP_HOME_0*(\d+)/) {
+			my $home_id = $1;
+			if (exists $home_id_to_server_id{$home_id}) {
+				$server_name = $home_id_to_server_id{$home_id};  # Use actual server ID
+			} else {
+				$server_name = "GameServer_Home_$home_id";  # Fallback to home_id
+			}
+		} elsif ($session =~ /OGP_\w+_(.+)/) {
 			$server_name = $1;
 		} elsif ($session =~ /(\d+)\.(.+)/) {
 			$server_name = $2;
 		}
-		
-		my $server_path = '/'; # Default path, could be enhanced to find actual server path
 		
 		# Get PIDs of processes in this screen session
 		my $screen_pid_line = `screen -ls 2>/dev/null | grep '$session'`;
