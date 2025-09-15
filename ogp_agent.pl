@@ -3335,8 +3335,39 @@ sub collect_and_insert_process_samples
 		}
 	}
 	
+	# Check startup files to find configured game server executables
+	my %startup_executables = ();
+	if (opendir(STARTUP_DIR, GAME_STARTUP_DIR)) {
+		while (my $startup_file = readdir(STARTUP_DIR)) {
+			next if $startup_file =~ /^\./;
+			
+			my $startup_path = Path::Class::File->new(GAME_STARTUP_DIR, $startup_file);
+			if (open(STARTUP_FILE, '<', $startup_path)) {
+				while (<STARTUP_FILE>) {
+					chomp;
+					my ($home_id, $home_path, $server_exe, $run_dir, $startup_cmd) = split(',', $_);
+					if ($server_exe && $home_path) {
+						# Extract just the executable name for process matching
+						my ($exe_name) = $server_exe =~ /([^\/]+)$/;
+						$startup_executables{$exe_name} = {
+							home_id => $home_id,
+							home_path => $home_path,
+							full_exe => $server_exe
+						} if $exe_name;
+					}
+				}
+				close(STARTUP_FILE);
+			}
+		}
+		closedir(STARTUP_DIR);
+	}
+	
 	# Also look for common game server processes that might not be in screen sessions
 	my @common_game_processes = qw(srcds_run srcds_linux minecraft_server java steamcmd csgo tf2 gmod);
+	
+	# Add executables from startup files to the search list
+	push @common_game_processes, keys %startup_executables;
+	
 	foreach my $proc_pattern (@common_game_processes) {
 		my @pids = `pgrep -f '$proc_pattern' 2>/dev/null`;
 		foreach my $pid (@pids) {
@@ -3346,8 +3377,18 @@ sub collect_and_insert_process_samples
 			# Avoid duplicates by checking if we already processed this PID
 			next if grep { $_->{pid} == $pid } @processes;
 			
-			my $server_name = "GameServer_$proc_pattern" . "_PID$pid";
-			my $proc_info = get_process_info($pid, $server_name, '/');
+			# Use startup info if available, otherwise use generic naming
+			my $server_name;
+			my $server_path = '/';
+			if (exists $startup_executables{$proc_pattern}) {
+				my $startup_info = $startup_executables{$proc_pattern};
+				$server_name = "GameServer_" . ($startup_info->{home_id} || $proc_pattern) . "_PID$pid";
+				$server_path = $startup_info->{home_path} || '/';
+			} else {
+				$server_name = "GameServer_$proc_pattern" . "_PID$pid";
+			}
+			
+			my $proc_info = get_process_info($pid, $server_name, $server_path);
 			push @processes, $proc_info if $proc_info;
 		}
 	}
@@ -3455,10 +3496,10 @@ sub get_process_info
 	# Get open file descriptors count
 	my $open_fds = 0;
 	my $fd_dir = "/proc/$pid/fd";
-	if (opendir(FD_DIR, $fd_dir)) {
-		my @fds = readdir(FD_DIR);
+	if (opendir(PROC_FD_DIR, $fd_dir)) {
+		my @fds = readdir(PROC_FD_DIR);
 		$open_fds = scalar(grep { /^\d+$/ } @fds);
-		closedir(FD_DIR);
+		closedir(PROC_FD_DIR);
 	}
 	
 	# Get listening ports (simplified)
