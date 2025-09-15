@@ -3395,20 +3395,9 @@ sub collect_and_insert_process_samples
 	my $startup_exe_count = scalar(keys %startup_executables);
 	logger "Found $startup_exe_count executable(s) from startup files for process monitoring" if $startup_exe_count > 0;
 	
-	# Also look for common game server processes that might not be in screen sessions
-	my @common_game_processes = qw(
-		srcds_run srcds_linux minecraft_server java steamcmd 
-		csgo tf2 gmod hl2 css l4d2 insurgency gmodserver
-		rust RustDedicated ark arkserver 7DaysToDie valheim
-		terraria tshock projectzomboid killing_floor squad
-		mordhau atlas conan deadmatter avorion assetto
-		beamng wreckfest
-	);
-	
-	# Add executables from startup files to the search list
-	push @common_game_processes, keys %startup_executables;
-	
-	foreach my $proc_pattern (@common_game_processes) {
+	# Only look for processes that match executables from startup files
+	# This ensures we only monitor games that are actually configured in the startups folder
+	foreach my $proc_pattern (keys %startup_executables) {
 		my @pids = `pgrep -f '$proc_pattern' 2>/dev/null`;
 		foreach my $pid (@pids) {
 			chomp($pid);
@@ -3417,20 +3406,21 @@ sub collect_and_insert_process_samples
 			# Avoid duplicates by checking if we already processed this PID
 			next if grep { $_->{pid} == $pid } @processes;
 			
-			# Use startup info if available, otherwise use generic naming
-			my $server_name;
-			my $server_path = '/';
-			if (exists $startup_executables{$proc_pattern}) {
-				my $startup_info = $startup_executables{$proc_pattern};
-				# Use the actual server ID from the startup file (e.g., "1518" becomes server name "1518")
-				$server_name = $startup_info->{server_id} || "Unknown_Server_PID$pid";
-				$server_path = $startup_info->{home_path} || '/';
-			} else {
-				$server_name = "GameServer_$proc_pattern" . "_PID$pid";
-			}
+			# Get the startup info for this executable
+			my $startup_info = $startup_executables{$proc_pattern};
 			
+			# Use the actual server ID from the startup file (e.g., "1518" becomes server name "1518")
+			my $server_name = $startup_info->{server_id} || "Unknown_Server_PID$pid";
+			my $server_path = $startup_info->{home_path} || '/';
+			
+			# Additional validation: check if the process is actually running from the expected path
 			my $proc_info = get_process_info($pid, $server_name, $server_path);
-			push @processes, $proc_info if $proc_info;
+			if ($proc_info) {
+				# Verify that the process command line contains the expected home path
+				if ($proc_info->{cmd} =~ /\Q$server_path\E/ || $server_path eq '/') {
+					push @processes, $proc_info;
+				}
+			}
 		}
 	}
 	
