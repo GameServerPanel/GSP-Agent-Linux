@@ -56,7 +56,11 @@ $windows = ['1h'=>1, '24h'=>24, '7d'=>168];
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>GSP Stats Dashboard<?= $machine ? " – ".htmlspecialchars($machine) : "" ?></title>
+<title>GSP Stats Dashboard<?php if ($machine) { 
+  $title_machine_info = q($mysqli, "SELECT hostname FROM {$TABLE_PREFIX}machines WHERE machine_id = ?", [$machine]);
+  $title_hostname = $title_machine_info ? $title_machine_info[0]['hostname'] : $machine;
+  echo " – ".htmlspecialchars($title_hostname);
+} ?></title>
 <?php if ($AUTO_REFRESH_SECONDS>0): ?>
 <meta http-equiv="refresh" content="<?= (int)$AUTO_REFRESH_SECONDS ?>">
 <?php endif; ?>
@@ -117,9 +121,26 @@ try {
       FROM {$TABLE_PREFIX}machines m ORDER BY m.created_at DESC");
     echo '<div class="grid">';
     foreach ($rows as $r) {
+      // Get latest machine sample for this machine to show current status
+      $latest_sample = q($mysqli, "SELECT cpu_pct, mem_used_pct, disk_used_pct, load1 FROM {$TABLE_PREFIX}machine_samples WHERE machine_id=? ORDER BY ts DESC LIMIT 1", [$r['machine_id']]);
+      $sample = $latest_sample ? $latest_sample[0] : null;
+      
       echo '<div class="col-4 card">';
-      echo '<div class="hdr"><h3 class="mono">'.htmlspecialchars($r['machine_id']).'</h3><span class="muted">'.htmlspecialchars($r['hostname']).'</span></div>';
+      echo '<div class="hdr"><h3 class="mono">'.htmlspecialchars($r['hostname']).'</h3><span class="muted">'.htmlspecialchars($r['machine_id']).'</span></div>';
       echo '<div class="small muted">Last sample: '.htmlspecialchars($r['last_ts'] ?: '—').'</div>';
+      
+      // Show current resource usage if available
+      if ($sample) {
+        echo '<div class="row" style="margin-top:8px;gap:8px;">';
+        echo '<div style="flex:1"><div class="small muted">CPU</div><div class="small">'.pct($sample['cpu_pct']).'</div></div>';
+        echo '<div style="flex:1"><div class="small muted">MEM</div><div class="small">'.pct($sample['mem_used_pct']).'</div></div>';
+        echo '<div style="flex:1"><div class="small muted">DISK</div><div class="small">'.pct($sample['disk_used_pct']).'</div></div>';
+        if ($sample['load1'] !== null) {
+          echo '<div style="flex:1"><div class="small muted">LOAD</div><div class="small">'.number_format((float)$sample['load1'], 1).'</div></div>';
+        }
+        echo '</div>';
+      }
+      
       echo '<div style="margin-top:10px"><a class="btn" href="?machine='.urlencode($r['machine_id']).'">Open</a></div>';
       echo '</div>';
     }
@@ -181,8 +202,13 @@ try {
   <div class="grid">
     <div class="col-12 card">
       <div class="hdr">
-        <h2 class="mono"><?= htmlspecialchars($machine) ?></h2>
-        <div class="muted small">Last sample: <?= htmlspecialchars($last['ts'] ?? '—') ?> • IF: <?= htmlspecialchars($last['net_iface'] ?? '—') ?></div>
+        <?php 
+        // Get machine info to show hostname prominently
+        $machine_info = q($mysqli, "SELECT hostname FROM {$TABLE_PREFIX}machines WHERE machine_id = ?", [$machine]);
+        $hostname = $machine_info ? $machine_info[0]['hostname'] : $machine;
+        ?>
+        <h2><?= htmlspecialchars($hostname) ?></h2>
+        <div class="muted small">Machine ID: <?= htmlspecialchars($machine) ?> • Last sample: <?= htmlspecialchars($last['ts'] ?? '—') ?> • IF: <?= htmlspecialchars($last['net_iface'] ?? '—') ?></div>
       </div>
       <div class="split">
         <div>
@@ -200,6 +226,12 @@ try {
           <div class="kpi"><?= pct($last ? (float)$last['disk_used_pct'] : null) ?></div>
           <div class="barwrap"><span class="<?= pct_class($last ? (float)$last['disk_used_pct'] : null) ?>" style="width:<?= $last? min(100,max(0,(float)$last['disk_used_pct'])):0 ?>%"></span></div>
           <div class="small subtle mono"><?= htmlspecialchars($last['disk_path'] ?? '') ?> • used <?= fmt_bytes($last['disk_used_bytes'] ?? null) ?> / <?= fmt_bytes($last['disk_total_bytes'] ?? null) ?></div>
+        </div>
+        <div>
+          <div class="muted small">Load average (last)</div>
+          <?php $load1 = $last ? (float)$last['load1'] : null; ?>
+          <div class="kpi"><?= $load1 !== null ? number_format($load1, 1) : '—' ?></div>
+          <div class="small subtle mono">1min: <?= $load1 !== null ? number_format($load1, 1) : '—' ?> • 5min: <?= $last && $last['load5'] !== null ? number_format((float)$last['load5'], 1) : '—' ?> • 15min: <?= $last && $last['load15'] !== null ? number_format((float)$last['load15'], 1) : '—' ?></div>
         </div>
         <div>
           <div class="muted small">Net avg util (1h)</div>
