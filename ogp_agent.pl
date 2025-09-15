@@ -3172,11 +3172,13 @@ sub create_resource_stats_tables
 
 sub get_machine_id
 {
-	# Use agent key as machine identifier, or fallback to hostname
-	my $machine_id = AGENT_KEY;
+	# Use hostname as machine identifier for better identification
+	my $machine_id = `hostname`;
+	chomp($machine_id);
+	
+	# Fallback to agent key only if hostname is not available
 	if (!$machine_id || $machine_id eq '') {
-		$machine_id = `hostname`;
-		chomp($machine_id);
+		$machine_id = AGENT_KEY;
 	}
 	return $machine_id;
 }
@@ -3296,19 +3298,26 @@ sub collect_and_insert_process_samples
 	my @processes = ();
 	
 	# Find screen sessions that might be game servers
-	my @screen_sessions = `screen -ls 2>/dev/null | grep "\\." | awk '{print \$1}'`;
+	my @screen_sessions = `screen -ls 2>/dev/null | grep -E "\\s+[0-9]+\\." | awk '{print \$1}'`;
 	
 	foreach my $session (@screen_sessions) {
 		chomp($session);
 		next unless $session;
 		
-		# Extract server name from screen session name (format: OGP_<server_id>_<server_name>)
+		# Extract server name from screen session name (format: OGP_<server_id>_<server_name> or similar)
 		my $server_name = $session;
+		# Try to extract a more readable server name
+		if ($session =~ /OGP_\d+_(.+)/) {
+			$server_name = $1;
+		} elsif ($session =~ /(\d+)\.(.+)/) {
+			$server_name = $2;
+		}
+		
 		my $server_path = '/'; # Default path, could be enhanced to find actual server path
 		
 		# Get PIDs of processes in this screen session
-		my $screen_pid = `screen -ls | grep '$session' | sed 's/.*\\(\\([0-9]*\\)\\..*/\\2/'`;
-		chomp($screen_pid);
+		my $screen_pid_line = `screen -ls 2>/dev/null | grep '$session'`;
+		my ($screen_pid) = $screen_pid_line =~ /(\d+)\./;
 		
 		if ($screen_pid && $screen_pid =~ /^\d+$/) {
 			# Get child processes of the screen session
@@ -3323,6 +3332,23 @@ sub collect_and_insert_process_samples
 				my $proc_info = get_process_info($pid, $server_name, $server_path);
 				push @processes, $proc_info if $proc_info;
 			}
+		}
+	}
+	
+	# Also look for common game server processes that might not be in screen sessions
+	my @common_game_processes = qw(srcds_run srcds_linux minecraft_server java steamcmd csgo tf2 gmod);
+	foreach my $proc_pattern (@common_game_processes) {
+		my @pids = `pgrep -f '$proc_pattern' 2>/dev/null`;
+		foreach my $pid (@pids) {
+			chomp($pid);
+			next unless $pid && $pid =~ /^\d+$/;
+			
+			# Avoid duplicates by checking if we already processed this PID
+			next if grep { $_->{pid} == $pid } @processes;
+			
+			my $server_name = "GameServer_$proc_pattern" . "_PID$pid";
+			my $proc_info = get_process_info($pid, $server_name, '/');
+			push @processes, $proc_info if $proc_info;
 		}
 	}
 	
@@ -3386,8 +3412,27 @@ sub get_process_info
 		close(STATUS);
 	}
 	
-	# Get CPU percentage (simplified calculation)
-	my $cpu_pct = 0; # Would need historical data for accurate CPU%
+	# Get CPU percentage (using utime + stime from /proc/pid/stat)
+	my $cpu_pct = 0;
+	if (@stat_fields >= 15) {
+		my $utime = $stat_fields[13] || 0;  # user time
+		my $stime = $stat_fields[14] || 0;  # system time
+		my $total_time = $utime + $stime;
+		
+		# Get system uptime and process start time for CPU calculation
+		my $uptime_info = `cat /proc/uptime 2>/dev/null`;
+		if ($uptime_info && $uptime_info =~ /^(\S+)/) {
+			my $system_uptime = $1;
+			my $starttime = $stat_fields[21] || 0; # process start time in clock ticks
+			my $hertz = `getconf CLK_TCK 2>/dev/null` || 100; # clock ticks per second
+			chomp($hertz);
+			
+			my $process_uptime = $system_uptime - ($starttime / $hertz);
+			if ($process_uptime > 0) {
+				$cpu_pct = sprintf("%.2f", ($total_time / $hertz) / $process_uptime * 100);
+			}
+		}
+	}
 	
 	# Calculate memory percentage (of total system memory)
 	my $mem_pct = 0;
@@ -3424,8 +3469,20 @@ sub get_process_info
 		$listening_ports = join(',', split(/\n/, $netstat_output));
 	}
 	
-	# Get folder size (for server_path) - this is expensive, so we'll skip it for now or do it periodically
+	# Get folder size (for server_path) - try to find server directory from command line
 	my $folder_size_bytes = 0;
+	if ($cmd && $cmd =~ m{(/\S+)}) {
+		# Try to extract directory from command line
+		my $potential_path = $1;
+		$potential_path =~ s/\/[^\/]+$//; # Remove filename, keep directory
+		if (-d $potential_path && $potential_path ne '/') {
+			$server_path = $potential_path;
+			# Get folder size (this is expensive, so we limit it)
+			my $du_output = `timeout 5 du -sb '$potential_path' 2>/dev/null | awk '{print \$1}'`;
+			chomp($du_output);
+			$folder_size_bytes = $du_output if $du_output && $du_output =~ /^\d+$/;
+		}
+	}
 	
 	return {
 		server_name => $server_name,
