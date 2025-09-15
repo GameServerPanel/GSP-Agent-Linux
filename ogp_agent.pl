@@ -3345,12 +3345,12 @@ sub collect_and_insert_process_samples
 			if (open(STARTUP_FILE, '<', $startup_path)) {
 				while (<STARTUP_FILE>) {
 					chomp;
-					my ($home_id, $home_path, $server_exe, $run_dir, $startup_cmd) = split(',', $_);
+					my ($server_id, $home_path, $server_exe, $run_dir, $startup_cmd) = split(',', $_);
 					if ($server_exe && $home_path) {
 						# Extract just the executable name for process matching
 						my ($exe_name) = $server_exe =~ /([^\/]+)$/;
 						$startup_executables{$exe_name} = {
-							home_id => $home_id,
+							server_id => $server_id,    # This is the actual server ID from startup file
 							home_path => $home_path,
 							full_exe => $server_exe
 						} if $exe_name;
@@ -3392,7 +3392,8 @@ sub collect_and_insert_process_samples
 			my $server_path = '/';
 			if (exists $startup_executables{$proc_pattern}) {
 				my $startup_info = $startup_executables{$proc_pattern};
-				$server_name = "GameServer_" . ($startup_info->{home_id} || $proc_pattern) . "_PID$pid";
+				# Use the actual server ID from the startup file (e.g., "1518" becomes server name "1518")
+				$server_name = $startup_info->{server_id} || "Unknown_Server_PID$pid";
 				$server_path = $startup_info->{home_path} || '/';
 			} else {
 				$server_name = "GameServer_$proc_pattern" . "_PID$pid";
