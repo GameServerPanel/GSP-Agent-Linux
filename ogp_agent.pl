@@ -3362,8 +3362,18 @@ sub collect_and_insert_process_samples
 		closedir(STARTUP_DIR);
 	}
 	
+	my $startup_exe_count = scalar(keys %startup_executables);
+	logger "Found $startup_exe_count executable(s) from startup files for process monitoring" if $startup_exe_count > 0;
+	
 	# Also look for common game server processes that might not be in screen sessions
-	my @common_game_processes = qw(srcds_run srcds_linux minecraft_server java steamcmd csgo tf2 gmod);
+	my @common_game_processes = qw(
+		srcds_run srcds_linux minecraft_server java steamcmd 
+		csgo tf2 gmod hl2 css l4d2 insurgency gmodserver
+		rust RustDedicated ark arkserver 7DaysToDie valheim
+		terraria tshock projectzomboid killing_floor squad
+		mordhau atlas conan deadmatter avorion assetto
+		beamng wreckfest
+	);
 	
 	# Add executables from startup files to the search list
 	push @common_game_processes, keys %startup_executables;
