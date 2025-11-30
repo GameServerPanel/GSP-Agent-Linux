@@ -15,7 +15,7 @@ Perl-based agent that receives signed RPC calls from the GameServer Panel (GSP) 
 ```bash
 sudo apt update
 sudo apt install -y git curl rsync screen perl libxml-parser-perl libpath-class-perl
-sudo git clone https://github.com/GameServerPanel/GSP_Agent_Linux.git /opt/gsp-agent
+sudo git clone https://github.com/GameServerPanel/GSP-Agent-Linux.git /opt/gsp-agent
 cd /opt/gsp-agent
 sudo bash install.sh
 sudo bash agent_conf.sh -s "root-password" -u ogp_agent
